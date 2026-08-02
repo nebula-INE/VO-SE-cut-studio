@@ -55,9 +55,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install FFmpeg dev
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
-
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswscale-dev \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev
+            
       - name: Configure CMake
         run: cmake -B build
 

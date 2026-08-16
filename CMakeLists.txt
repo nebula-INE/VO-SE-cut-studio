@@ -12,6 +12,7 @@ pkg_check_modules(FFMPEG REQUIRED
     libavfilter
     libswscale
 )
+pkg_check_modules(GLFW REQUIRED glfw3)
 
 # デバッグ出力（ビルドログで確認）
 message(STATUS "FFMPEG_INCLUDE_DIRS = ${FFMPEG_INCLUDE_DIRS}")
@@ -55,3 +56,26 @@ target_include_directories(aural-compose PRIVATE
 )
 target_link_directories(aural-compose PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural-compose ${FFMPEG_LIBRARIES})
+
+# --- aural-gui: GLFWウィンドウ + プレビュー再生 ---
+add_executable(aural-gui
+    src/gui_main.cpp
+    src/video_decoder.cpp
+    src/texture_uploader.cpp
+)
+
+target_include_directories(aural-gui PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${FFMPEG_INCLUDE_DIRS}
+    ${GLFW_INCLUDE_DIRS}
+)
+target_link_directories(aural-gui PRIVATE ${FFMPEG_LIBRARY_DIRS} ${GLFW_LIBRARY_DIRS})
+target_link_libraries(aural-gui ${FFMPEG_LIBRARIES} ${GLFW_LIBRARIES})
+
+if(APPLE)
+    target_link_libraries(aural-gui "-framework OpenGL")
+elseif(UNIX)
+    target_link_libraries(aural-gui ${OPENGL_LIBRARIES})
+elseif(WIN32)
+    target_link_libraries(aural-gui opengl32)
+endif()

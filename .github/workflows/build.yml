@@ -16,7 +16,7 @@ jobs:
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install ffmpeg:x64-windows
+          .\vcpkg\vcpkg install ffmpeg:x64-windows glfw3:x64-windows
 
       - name: Configure CMake
         run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -35,8 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install FFmpeg
-        run: brew install ffmpeg
+      - name: Install dependencies
+        run: brew install ffmpeg glfw
 
       - name: Configure CMake
         run: cmake -B build
@@ -48,7 +48,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aural-engine-macos
-          path: build/aural-engine
+          path: |
+            build/aural-engine
+            build/aural-compose
+            build/aural-gui
 
   build-linux:
     runs-on: ubuntu-latest
@@ -62,10 +65,12 @@ jobs:
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
+            libavfilter-dev \
             libswscale-dev \
             libgl1-mesa-dev \
-            libglu1-mesa-dev
-            
+            libglu1-mesa-dev \
+            libglfw3-dev
+
       - name: Configure CMake
         run: cmake -B build
 
@@ -76,4 +81,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aural-engine-linux
-          path: build/aural-engine
+          path: |
+            build/aural-engine
+            build/aural-compose
+            build/aural-gui

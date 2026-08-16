@@ -18,7 +18,11 @@ add_executable(aural-engine
     src/texture_uploader.cpp
 )
 
-target_include_directories(aural-engine PRIVATE ${FFMPEG_INCLUDE_DIRS})
+# 自作ヘッダー(video_decoder.h, texture_uploader.h)の置き場所
+target_include_directories(aural-engine PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${FFMPEG_INCLUDE_DIRS}
+)
 target_link_directories(aural-engine PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural-engine ${FFMPEG_LIBRARIES})
 

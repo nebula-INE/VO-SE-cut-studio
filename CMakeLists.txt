@@ -5,14 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG REQUIRED libavcodec libavformat libavutil libswscale)
 
-# Windowsではvcpkg経由で見つかることを想定
-pkg_check_modules(FFMPEG REQUIRED
-    libavcodec
-    libavformat
-    libavutil
-    libswscale
-)
+# デバッグ用（ビルドログで確認）
+message(STATUS "FFMPEG_INCLUDE_DIRS = ${FFMPEG_INCLUDE_DIRS}")
+message(STATUS "FFMPEG_LIBRARY_DIRS = ${FFMPEG_LIBRARY_DIRS}")
+message(STATUS "FFMPEG_LIBRARIES   = ${FFMPEG_LIBRARIES}")
 
 add_executable(aural-engine
     src/main.cpp
@@ -21,9 +19,10 @@ add_executable(aural-engine
 )
 
 target_include_directories(aural-engine PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(aural-engine PRIVATE ${FFMPEG_LIBRARY_DIRS})   # ← これを追加
 target_link_libraries(aural-engine ${FFMPEG_LIBRARIES})
 
-# OpenGLは後で追加（Linux: GL, macOS: OpenGL.framework, Windows: opengl32）
+# OpenGL
 if(APPLE)
     target_link_libraries(aural-engine "-framework OpenGL")
 elseif(UNIX)

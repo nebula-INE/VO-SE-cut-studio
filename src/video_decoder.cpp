@@ -115,8 +115,16 @@ bool VideoDecoder::init_sws_context() {
         return false;
     }
 
-    // RGB24用の出力バッファを確保し、rgb_frame_ にリンクする
+    // RGB24用の出力バッファを確保し、rgb_frame_ にリンクする。
+    // 注意: libswscaleのSIMD最適化された内部ルーチンは、書き込み先バッファの
+    // 論理末尾を数バイト超えて書き込むことがある(固定幅のSIMDブロック単位で
+    // 処理するため、最終行の端で数バイトのオーバーランが起こり得る)。
+    // ぴったりのサイズで確保するとヒープ破壊につながるため、末尾に
+    // 安全マージンを確保しておく(reserveで容量にだけ余裕を持たせ、
+    // size()はwidth*height*3のまま保つ)。
+    constexpr size_t kSwsScratchPadding = 64;
     int num_bytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width_, height_, 1);
+    rgb_buffer_.reserve(static_cast<size_t>(num_bytes) + kSwsScratchPadding);
     rgb_buffer_.resize(static_cast<size_t>(num_bytes));
 
     av_image_fill_arrays(
@@ -174,6 +182,9 @@ bool VideoDecoder::decode_next_frame(DecodedFrame& out) {
 
         out.width = width_;
         out.height = height_;
+        // rgb_bufferと同様、後段でこのバッファがsws_scaleの読み込み元として
+        // 使われる場合に備え、末尾に安全マージンを確保しておく。
+        out.rgb_data.reserve(rgb_buffer_.size() + 64);
         out.rgb_data.assign(rgb_buffer_.begin(), rgb_buffer_.end());
 
         int64_t pts = frame_->best_effort_timestamp;

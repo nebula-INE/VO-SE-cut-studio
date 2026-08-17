@@ -1,0 +1,8 @@
+# aural Studio - PySide6 GUI 実行時の依存関係
+#
+# pybind11はビルド時(aural_engineモジュールのコンパイル)にのみ必要で、
+# 実行時には不要なため、ここには含めていない(CMakeLists.txt側でビルド時
+# 依存として扱う)。
+
+PySide6>=6.5
+numpy>=1.24

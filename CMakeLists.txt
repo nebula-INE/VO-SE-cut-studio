@@ -12,7 +12,6 @@ pkg_check_modules(FFMPEG REQUIRED
     libavfilter
     libswscale
 )
-pkg_check_modules(GLFW REQUIRED glfw3)
 
 # デバッグ出力（ビルドログで確認）
 message(STATUS "FFMPEG_INCLUDE_DIRS = ${FFMPEG_INCLUDE_DIRS}")
@@ -57,25 +56,26 @@ target_include_directories(aural-compose PRIVATE
 target_link_directories(aural-compose PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural-compose ${FFMPEG_LIBRARIES})
 
-# --- aural-gui: GLFWウィンドウ + プレビュー再生 ---
-add_executable(aural-gui
-    src/gui_main.cpp
+# --- aural_engine: PySide6 GUIから使うPython拡張モジュール(pybind11) ---
+# GUIはPySide6(Python側、python/preview.py)に統一したため、GLFWベースの
+# aural-guiはビルド対象から外している。gui_main.cpp/texture_uploader.*は
+# 将来QOpenGLWidget等で高性能プレビューが必要になった際の参考実装として
+# リポジトリには残しているが、現状は未使用。
+execute_process(
+    COMMAND python3 -m pybind11 --cmakedir
+    OUTPUT_VARIABLE pybind11_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+find_package(pybind11 CONFIG REQUIRED)
+
+pybind11_add_module(aural_engine
+    src/py_bindings.cpp
     src/video_decoder.cpp
-    src/texture_uploader.cpp
 )
 
-target_include_directories(aural-gui PRIVATE
+target_include_directories(aural_engine PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${FFMPEG_INCLUDE_DIRS}
-    ${GLFW_INCLUDE_DIRS}
 )
-target_link_directories(aural-gui PRIVATE ${FFMPEG_LIBRARY_DIRS} ${GLFW_LIBRARY_DIRS})
-target_link_libraries(aural-gui ${FFMPEG_LIBRARIES} ${GLFW_LIBRARIES})
-
-if(APPLE)
-    target_link_libraries(aural-gui "-framework OpenGL")
-elseif(UNIX)
-    target_link_libraries(aural-gui ${OPENGL_LIBRARIES})
-elseif(WIN32)
-    target_link_libraries(aural-gui opengl32)
-endif()
+target_link_directories(aural_engine PRIVATE ${FFMPEG_LIBRARY_DIRS})
+target_link_libraries(aural_engine PRIVATE ${FFMPEG_LIBRARIES})

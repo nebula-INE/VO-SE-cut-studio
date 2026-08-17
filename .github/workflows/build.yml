@@ -12,11 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install pybind11 PySide6 numpy
+
       - name: Setup vcpkg
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install ffmpeg:x64-windows glfw3:x64-windows
+          .\vcpkg\vcpkg install ffmpeg:x64-windows
 
       - name: Configure CMake
         run: cmake -B build -DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -28,15 +36,26 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aural-engine-windows
-          path: build/Release/*.exe
+          path: |
+            build/Release/*.exe
+            build/Release/*.pyd
+            python/
 
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install pybind11 PySide6 numpy
+
       - name: Install dependencies
-        run: brew install ffmpeg glfw
+        run: brew install ffmpeg
 
       - name: Configure CMake
         run: cmake -B build
@@ -51,12 +70,21 @@ jobs:
           path: |
             build/aural-engine
             build/aural-compose
-            build/aural-gui
+            build/aural_engine*.so
+            python/
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install pybind11 PySide6 numpy
 
       - name: Install dependencies
         run: |
@@ -69,7 +97,7 @@ jobs:
             libswscale-dev \
             libgl1-mesa-dev \
             libglu1-mesa-dev \
-            libglfw3-dev
+            libxcb-cursor0
 
       - name: Configure CMake
         run: cmake -B build
@@ -84,4 +112,5 @@ jobs:
           path: |
             build/aural-engine
             build/aural-compose
-            build/aural-gui
+            build/aural_engine*.so
+            python/

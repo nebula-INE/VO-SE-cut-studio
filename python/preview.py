@@ -1,9 +1,13 @@
-"""aural Studio - PySide6プレビュープレイヤー(骨組み)
+"""aural Studio - 映像プレビューパネル
 
 C++で実装したVideoDecoder(pybind11経由)からRGBフレームをnumpy配列として
-受け取り、QImageに変換してQLabelに描画する最小構成のプレビュープレイヤー。
+受け取り、QImageに変換してQLabelに描画する最小構成のプレビュー。
 
-使い方:
+PreviewPanel は他のウィンドウに埋め込んで使う再利用可能なQWidget。
+このファイル単体では、PreviewPanelをQMainWindowでラップしただけの
+簡易プレイヤーとして動作する(動作確認・単体デバッグ用)。
+
+使い方(単体実行):
     python3 preview.py <video_file>
 """
 
@@ -33,8 +37,9 @@ class VideoPreviewWidget(QLabel):
     def __init__(self) -> None:
         super().__init__()
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("background-color: #202020;")
+        self.setStyleSheet("background-color: #202020; color: #888888;")
         self.setMinimumSize(320, 240)
+        self.setText("動画が読み込まれていません")
 
     def show_frame(self, frame: np.ndarray) -> None:
         # frame: (H, W, 3) uint8, RGB順。
@@ -63,18 +68,26 @@ class VideoPreviewWidget(QLabel):
         self.setPixmap(scaled)
 
 
-class PreviewWindow(QMainWindow):
-    def __init__(self, video_path: str) -> None:
-        super().__init__()
-        self.setWindowTitle(f"aural preview - {video_path}")
+class PreviewPanel(QWidget):
+    """動画を開いて再生プレビューする、埋め込み可能なパネル。
 
-        self.decoder = aural_engine.VideoDecoder()
-        if not self.decoder.open(video_path):
-            raise RuntimeError(f"Failed to open video: {video_path}")
+    他のウィンドウ(main_window.py等)から:
+        panel = PreviewPanel()
+        panel.open_video("bg.mp4")
+    のように使う。video_pathを指定せずに構築した場合は、
+    open_video()を呼ぶまでプレースホルダー表示のまま待機する。
+    """
+
+    def __init__(self, video_path: str | None = None) -> None:
+        super().__init__()
+
+        self.decoder: aural_engine.VideoDecoder | None = None
+        self.is_playing = False
 
         self.preview = VideoPreviewWidget()
         self.play_button = QPushButton("Pause")
         self.play_button.clicked.connect(self.toggle_playback)
+        self.play_button.setEnabled(False)
 
         controls = QHBoxLayout()
         controls.addWidget(self.play_button)
@@ -83,24 +96,46 @@ class PreviewWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addWidget(self.preview, stretch=1)
         layout.addLayout(controls)
+        self.setLayout(layout)
 
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
-
-        self.resize(self.decoder.width, self.decoder.height + 40)
-
-        # fpsに応じたタイマー間隔でフレームを送り出す(簡易実装。
-        # 本格的な同期はPhase後半で音声クロック基準に作り直す想定)。
-        interval_ms = int(1000.0 / self.decoder.fps) if self.decoder.fps > 0 else 33
         self.timer = QTimer(self)
-        self.timer.setInterval(interval_ms)
         self.timer.timeout.connect(self.advance_frame)
-        self.timer.start()
 
+        if video_path:
+            self.open_video(video_path)
+
+    def open_video(self, video_path: str) -> bool:
+        """動画ファイルを開いて再生を開始する。失敗時はFalseを返す。"""
+        self.close_video()
+
+        decoder = aural_engine.VideoDecoder()
+        if not decoder.open(video_path):
+            self.preview.setText(f"動画を開けませんでした: {video_path}")
+            return False
+
+        self.decoder = decoder
+        self.play_button.setEnabled(True)
+
+        interval_ms = int(1000.0 / decoder.fps) if decoder.fps > 0 else 33
+        self.timer.setInterval(interval_ms)
+        self.timer.start()
         self.is_playing = True
+        self.play_button.setText("Pause")
+        return True
+
+    def close_video(self) -> None:
+        """再生中の動画があれば停止してリソースを解放する。"""
+        self.timer.stop()
+        if self.decoder is not None:
+            self.decoder.close()
+            self.decoder = None
+        self.is_playing = False
+        self.play_button.setEnabled(False)
 
     def advance_frame(self) -> None:
+        if self.decoder is None:
+            return
+
         result = self.decoder.decode_next_frame()
         if result is None:
             # 終端に達したら先頭へシークしてループ再生
@@ -113,6 +148,8 @@ class PreviewWindow(QMainWindow):
         self.preview.show_frame(frame)
 
     def toggle_playback(self) -> None:
+        if self.decoder is None:
+            return
         if self.is_playing:
             self.timer.stop()
             self.play_button.setText("Play")
@@ -121,9 +158,24 @@ class PreviewWindow(QMainWindow):
             self.play_button.setText("Pause")
         self.is_playing = not self.is_playing
 
+    def cleanup(self) -> None:
+        """ウィンドウが閉じられる際に呼び出す。"""
+        self.close_video()
+
+
+class PreviewWindow(QMainWindow):
+    """PreviewPanelを単体で動かすための簡易ウィンドウ(動作確認用)。"""
+
+    def __init__(self, video_path: str) -> None:
+        super().__init__()
+        self.setWindowTitle(f"aural preview - {video_path}")
+
+        self.panel = PreviewPanel(video_path)
+        self.setCentralWidget(self.panel)
+        self.resize(640, 520)
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
-        self.timer.stop()
-        self.decoder.close()
+        self.panel.cleanup()
         super().closeEvent(event)
 
 

@@ -7,7 +7,11 @@
 文字数から概算した仮の値(estimated=True)を使っている。エンジン統合後は
 実際の合成音声の長さに差し替える想定(TODO: マーク箇所を参照)。
 
-使い方:
+ScriptEditorPanel は他のウィンドウに埋め込んで使う再利用可能なQWidget。
+このファイル単体では、ScriptEditorPanelをQMainWindowでラップしただけの
+簡易エディタとして動作する(動作確認・単体デバッグ用)。
+
+使い方(単体実行):
     python3 script_editor.py
 """
 
@@ -19,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QColor, QPainter, QFont, QBrush, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -205,8 +209,7 @@ class TimelineWidget(QWidget):
         self.setMinimumHeight(self.BLOCK_HEIGHT + 20)
         self.setStyleSheet("background-color: #1e1e1e;")
 
-    def sizeHint(self):
-        from PySide6.QtCore import QSize
+    def sizeHint(self) -> QSize:
         total_width = int(self.model.total_duration_sec() * self.PIXELS_PER_SECOND) + 40
         return QSize(max(total_width, 400), self.BLOCK_HEIGHT + 20)
 
@@ -241,13 +244,18 @@ class TimelineWidget(QWidget):
         painter.end()
 
 
-# --- メインウィンドウ ---
+# --- 埋め込み可能なパネル本体 ---
 
-class ScriptEditorWindow(QMainWindow):
+class ScriptEditorPanel(QWidget):
+    """台本編集(チャット入力+トランスクリプト+タイムライン)一式をまとめたパネル。
+
+    他のウィンドウ(main_window.py等)から:
+        panel = ScriptEditorPanel()
+    のように埋め込んで使う。
+    """
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("aural Studio - 台本エディタ")
-        self.resize(900, 600)
 
         self.model = ScriptModel()
 
@@ -255,12 +263,12 @@ class ScriptEditorWindow(QMainWindow):
         self.chat_input = ChatInputWidget(self.model)
         self.chat_input.line_submitted.connect(self.on_line_submitted)
 
-        timeline_scroll = QScrollArea()
+        self.timeline_scroll = QScrollArea()
         self.timeline = TimelineWidget(self.model)
-        timeline_scroll.setWidget(self.timeline)
-        timeline_scroll.setWidgetResizable(False)
-        timeline_scroll.setFixedHeight(self.timeline.BLOCK_HEIGHT + 40)
-        timeline_scroll.setStyleSheet("background-color: #1e1e1e; border: none;")
+        self.timeline_scroll.setWidget(self.timeline)
+        self.timeline_scroll.setWidgetResizable(False)
+        self.timeline_scroll.setFixedHeight(self.timeline.BLOCK_HEIGHT + 40)
+        self.timeline_scroll.setStyleSheet("background-color: #1e1e1e; border: none;")
 
         chat_panel = QWidget()
         chat_layout = QVBoxLayout()
@@ -270,7 +278,7 @@ class ScriptEditorWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(chat_panel)
-        splitter.addWidget(timeline_scroll)
+        splitter.addWidget(self.timeline_scroll)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
@@ -287,12 +295,10 @@ class ScriptEditorWindow(QMainWindow):
         toolbar.addStretch(1)
         toolbar.addWidget(self.duration_label)
 
-        central = QWidget()
-        central_layout = QVBoxLayout()
-        central_layout.addLayout(toolbar)
-        central_layout.addWidget(splitter, stretch=1)
-        central.setLayout(central_layout)
-        self.setCentralWidget(central)
+        layout = QVBoxLayout()
+        layout.addLayout(toolbar)
+        layout.addWidget(splitter, stretch=1)
+        self.setLayout(layout)
 
     def on_line_submitted(self, speaker_name: str, text: str) -> None:
         line = self.model.add_line(speaker_name, text)
@@ -317,12 +323,15 @@ class ScriptEditorWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "台本を開く", "", "JSON (*.json)")
         if not path:
             return
+        self.load_script_from_path(path)
+
+    def load_script_from_path(self, path: str) -> bool:
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             self.model = ScriptModel.from_dict(data)
         except Exception as e:  # noqa: BLE001 (UIへのエラー表示が目的)
             QMessageBox.critical(self, "読み込みエラー", str(e))
-            return
+            return False
 
         self.transcript.clear()
         self.transcript.model = self.model
@@ -336,6 +345,28 @@ class ScriptEditorWindow(QMainWindow):
         self.timeline.updateGeometry()
         self.timeline.update()
         self._update_duration_label()
+        return True
+
+
+class ScriptEditorWindow(QMainWindow):
+    """ScriptEditorPanelを単体で動かすための簡易ウィンドウ(動作確認用)。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("aural Studio - 台本エディタ")
+        self.resize(900, 600)
+
+        self.panel = ScriptEditorPanel()
+        self.setCentralWidget(self.panel)
+
+    # ScriptEditorWindow.model / on_line_submitted 等への既存アクセス(テスト等)
+    # との後方互換のため、panel側へ委譲するプロパティを用意しておく。
+    @property
+    def model(self) -> ScriptModel:
+        return self.panel.model
+
+    def on_line_submitted(self, speaker_name: str, text: str) -> None:
+        self.panel.on_line_submitted(speaker_name, text)
 
 
 def main() -> int:

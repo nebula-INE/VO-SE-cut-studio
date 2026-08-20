@@ -23,7 +23,7 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QTimer
 from PySide6.QtGui import QColor, QPainter, QFont, QBrush, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -101,6 +101,21 @@ class ScriptModel:
 
     def total_duration_sec(self) -> float:
         return sum(l.estimated_duration_sec for l in self.lines)
+
+    def line_at_time(self, t: float) -> ScriptLine | None:
+        """累積尺(各セリフのestimated_duration_secの積み上げ)から、
+        経過時間tの時点で読み上げられているはずのセリフを返す。
+        該当が無ければNone。テロップのプレビュー表示用。
+        """
+        if t < 0:
+            return None
+        elapsed = 0.0
+        for line in self.lines:
+            duration = line.estimated_duration_sec
+            if elapsed <= t < elapsed + duration:
+                return line
+            elapsed += duration
+        return None
 
     def to_dict(self) -> dict:
         return {
@@ -206,8 +221,13 @@ class TimelineWidget(QWidget):
     def __init__(self, model: ScriptModel) -> None:
         super().__init__()
         self.model = model
+        self.playhead_sec: float | None = None  # Noneなら再生カーソルを描画しない
         self.setMinimumHeight(self.BLOCK_HEIGHT + 20)
         self.setStyleSheet("background-color: #1e1e1e;")
+
+    def set_playhead(self, t: float | None) -> None:
+        self.playhead_sec = t
+        self.update()
 
     def sizeHint(self) -> QSize:
         total_width = int(self.model.total_duration_sec() * self.PIXELS_PER_SECOND) + 40
@@ -241,6 +261,11 @@ class TimelineWidget(QWidget):
 
             x += width + 6
 
+        if self.playhead_sec is not None:
+            playhead_x = 10 + int(self.playhead_sec * self.PIXELS_PER_SECOND)
+            painter.setPen(QPen(QColor("#ffee00"), 2))
+            painter.drawLine(playhead_x, 0, playhead_x, self.BLOCK_HEIGHT + 20)
+
         painter.end()
 
 
@@ -252,12 +277,23 @@ class ScriptEditorPanel(QWidget):
     他のウィンドウ(main_window.py等)から:
         panel = ScriptEditorPanel()
     のように埋め込んで使う。
+
+    「▶ 台本プレビュー再生」を押すと、各セリフの推定尺(estimated_duration_sec)
+    に従って内部クロックが進み、現在読み上げられているはずのセリフのテキストを
+    telop_changed シグナルで発信する。VO-SEが無い現時点では実際の音声とは
+    連動していない、あくまで「タイミングの確認用」のプレビュー。
     """
+
+    telop_changed = Signal(str)  # 現在アクティブなセリフのテキスト(無ければ空文字列)
+
+    PLAYBACK_TICK_MS = 50
 
     def __init__(self) -> None:
         super().__init__()
 
         self.model = ScriptModel()
+        self._playback_elapsed_sec = 0.0
+        self._is_previewing = False
 
         self.transcript = TranscriptWidget(self.model)
         self.chat_input = ChatInputWidget(self.model)
@@ -285,6 +321,13 @@ class ScriptEditorPanel(QWidget):
         self.duration_label = QLabel()
         self._update_duration_label()
 
+        self.preview_button = QPushButton("▶ 台本プレビュー再生")
+        self.preview_button.clicked.connect(self.toggle_preview_playback)
+
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setInterval(self.PLAYBACK_TICK_MS)
+        self.playback_timer.timeout.connect(self._advance_playback)
+
         toolbar = QHBoxLayout()
         save_button = QPushButton("台本を保存")
         save_button.clicked.connect(self.save_script)
@@ -292,6 +335,7 @@ class ScriptEditorPanel(QWidget):
         load_button.clicked.connect(self.load_script)
         toolbar.addWidget(save_button)
         toolbar.addWidget(load_button)
+        toolbar.addWidget(self.preview_button)
         toolbar.addStretch(1)
         toolbar.addWidget(self.duration_label)
 
@@ -306,6 +350,42 @@ class ScriptEditorPanel(QWidget):
         self.timeline.updateGeometry()
         self.timeline.update()
         self._update_duration_label()
+
+    def toggle_preview_playback(self) -> None:
+        if self._is_previewing:
+            self.stop_preview_playback()
+        else:
+            self.start_preview_playback()
+
+    def start_preview_playback(self) -> None:
+        if not self.model.lines:
+            return
+        self._is_previewing = True
+        self._playback_elapsed_sec = 0.0
+        self.preview_button.setText("■ 再生停止")
+        self.playback_timer.start()
+        self._advance_playback()  # 最初のセリフを即座に反映する
+
+    def stop_preview_playback(self) -> None:
+        self._is_previewing = False
+        self.playback_timer.stop()
+        self.preview_button.setText("▶ 台本プレビュー再生")
+        self.timeline.set_playhead(None)
+        self.telop_changed.emit("")
+
+    def _advance_playback(self) -> None:
+        total = self.model.total_duration_sec()
+        if total <= 0:
+            self.stop_preview_playback()
+            return
+
+        # 台本全体を尺分ループ再生する(動画側のループ再生と発想を合わせている)
+        self._playback_elapsed_sec = (self._playback_elapsed_sec + self.PLAYBACK_TICK_MS / 1000.0) % total
+
+        self.timeline.set_playhead(self._playback_elapsed_sec)
+
+        active_line = self.model.line_at_time(self._playback_elapsed_sec)
+        self.telop_changed.emit(active_line.text if active_line else "")
 
     def _update_duration_label(self) -> None:
         total = self.model.total_duration_sec()
@@ -326,6 +406,7 @@ class ScriptEditorPanel(QWidget):
         self.load_script_from_path(path)
 
     def load_script_from_path(self, path: str) -> bool:
+        self.stop_preview_playback()
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             self.model = ScriptModel.from_dict(data)
@@ -346,6 +427,10 @@ class ScriptEditorPanel(QWidget):
         self.timeline.update()
         self._update_duration_label()
         return True
+
+    def cleanup(self) -> None:
+        """ウィンドウが閉じられる際に呼び出す。"""
+        self.playback_timer.stop()
 
 
 class ScriptEditorWindow(QMainWindow):

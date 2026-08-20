@@ -45,6 +45,10 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.script_dock)
 
+        # 台本エディタの「台本プレビュー再生」で進む現在のセリフを
+        # 映像プレビューへテロップとしてオーバーレイ表示する。
+        self.script_panel.telop_changed.connect(self.preview_panel.set_telop)
+
         self._build_menu()
 
     def _build_menu(self) -> None:
@@ -76,6 +80,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
         self.preview_panel.cleanup()
+        self.script_panel.cleanup()
         super().closeEvent(event)
 
 

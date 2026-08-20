@@ -16,8 +16,8 @@ from __future__ import annotations
 import sys
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, QTimer, QRectF
+from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -32,7 +32,12 @@ import aural_engine
 
 
 class VideoPreviewWidget(QLabel):
-    """デコードしたフレームを表示するだけの薄いラッパー。"""
+    """デコードしたフレームを表示し、テロップ(字幕)をオーバーレイするウィジェット。
+
+    テロップのテキストは台本エディタ側(ScriptEditorPanel)の推定タイミングから
+    渡される想定(MainWindow経由)。VO-SE統合前のため実際の音声とは連動しない、
+    タイミング確認用のプレビュー。
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -41,23 +46,43 @@ class VideoPreviewWidget(QLabel):
         self.setMinimumSize(320, 240)
         self.setText("動画が読み込まれていません")
 
+        self._last_frame: np.ndarray | None = None
+        self._telop_text: str = ""
+
     def show_frame(self, frame: np.ndarray) -> None:
         # frame: (H, W, 3) uint8, RGB順。
         # numpy配列のメモリをQImageが直接参照するため、C-contiguousで
         # なければならない(VideoDecoder側は常にtightly packedで返すため
         # 通常は問題ないが、念のため保証しておく)。
-        frame = np.ascontiguousarray(frame)
-        height, width, _ = frame.shape
+        self._last_frame = np.ascontiguousarray(frame)
+        self._redraw()
+
+    def set_telop(self, text: str) -> None:
+        """現在表示すべきテロップのテキストを設定する。空文字列で非表示。"""
+        if text == self._telop_text:
+            return
+        self._telop_text = text
+        # 動画が一時停止中でもテロップの更新だけは画面に反映させる
+        self._redraw()
+
+    def _redraw(self) -> None:
+        if self._last_frame is None:
+            return
+
+        height, width, _ = self._last_frame.shape
         bytes_per_line = width * 3
 
         image = QImage(
-            frame.tobytes(),  # QImageに独立したコピーを持たせ、frameの寿命に依存しないようにする
+            self._last_frame.tobytes(),  # QImageに独立したコピーを持たせる
             width,
             height,
             bytes_per_line,
             QImage.Format.Format_RGB888,
         )
         pixmap = QPixmap.fromImage(image)
+
+        if self._telop_text:
+            self._draw_telop(pixmap)
 
         # ウィジェットサイズに合わせてアスペクト比を保ったまま縮小表示
         scaled = pixmap.scaled(
@@ -66,6 +91,24 @@ class VideoPreviewWidget(QLabel):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.setPixmap(scaled)
+
+    def _draw_telop(self, pixmap: QPixmap) -> None:
+        """フレーム画像(元解像度)の下部に半透明バー+テキストを描画する。"""
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        bar_height = max(28, int(pixmap.height() * 0.12))
+        bar_rect = QRectF(0, pixmap.height() - bar_height, pixmap.width(), bar_height)
+
+        painter.fillRect(bar_rect, QColor(0, 0, 0, 160))
+
+        font = painter.font()
+        font.setPointSize(max(10, int(bar_height * 0.4)))
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(bar_rect, Qt.AlignmentFlag.AlignCenter, self._telop_text)
+
+        painter.end()
 
 
 class PreviewPanel(QWidget):
@@ -157,6 +200,12 @@ class PreviewPanel(QWidget):
             self.timer.start()
             self.play_button.setText("Pause")
         self.is_playing = not self.is_playing
+
+    def set_telop(self, text: str) -> None:
+        """台本エディタ側から現在のセリフのテキストを受け取り、
+        映像上にオーバーレイ表示する。空文字列で非表示になる。
+        """
+        self.preview.set_telop(text)
 
     def cleanup(self) -> None:
         """ウィンドウが閉じられる際に呼び出す。"""

@@ -63,6 +63,7 @@ using VoseSharedMutex = std::shared_mutex;
 #  define access _access
 #  define F_OK 0
 #  define mkdir(path, mode) _mkdir(path) // 2引数版をWindows用に1引数ラップ
+#  define unlink _unlink // save_cache() の破損.tmpファイル削除で使用
 #else
 #  include <unistd.h>
 #endif
@@ -307,6 +308,41 @@ public:
 
 static CacheStore g_analysis_cache;
 static std::mutex g_analysis_cache_mutex;
+
+// ============================================================
+// KeyedLockRegistry — 同一キーに対する重複処理を防ぐための
+// per-key ミューテックス。
+//
+// 問題: get_or_analyze() は「メモリキャッシュ確認 → ディスクキャッシュ
+//   確認 → 新規解析(Harvest/CheapTrick/D4C) → 保存」という一連の流れを
+//   一切ロックせずに実行していた。同一音源を使う複数ノートが並列
+//   ワーカーへ振り分けられた場合、以下が起こり得る:
+//     1) 同じ音源の重い解析処理が複数スレッドで無駄に重複実行される
+//     2) save_cache() が同じ一時ファイル(cache_path + ".tmp")へ
+//        複数スレッドから同時書き込みし、rename() が競合してキャッシュ
+//        ファイルが破損する可能性がある
+//
+// 解決: キーごとに個別の mutex を割り当て、get_or_analyze() の
+//   「チェック→解析→保存」区間をキー単位で直列化する。異なるキー同士は
+//   並列のまま進められるため、g_analysis_cache_mutex による全体直列化
+//   よりも並列性を落とさずに済む。
+// ============================================================
+class KeyedLockRegistry {
+    std::mutex map_mutex;
+    std::unordered_map<std::string, std::shared_ptr<std::mutex>> locks;
+
+public:
+    std::shared_ptr<std::mutex> get_lock(const std::string& key) {
+        std::lock_guard<std::mutex> lg(map_mutex);
+        auto it = locks.find(key);
+        if (it != locks.end()) return it->second;
+        auto m = std::make_shared<std::mutex>();
+        locks.emplace(key, m);
+        return m;
+    }
+};
+
+static KeyedLockRegistry g_analysis_lock_registry;
 
 // ============================================================
 // NoteState / NotePrepass
@@ -671,13 +707,29 @@ get_or_analyze(std::shared_ptr<const EmbeddedVoice> ev_sp, int fft_size, int spe
     if (!ev_sp) return nullptr;
     const std::string& key = ev_sp->path;
 
-    // 1. メモリキャッシュをチェック（CacheStore 内部でロック）
+    // 1. メモリキャッシュをチェック（ロック不要の高速パス。CacheStore内部でロック）
     {
         auto cached = g_analysis_cache.get(key);
         if (cached) return cached;
     }
 
-    // 2. ディスクキャッシュ読み込み（ロック外）
+    // 2. [修正] ここから先（ディスク読み込み〜新規解析〜保存）はキーごとに
+    //    直列化する。以前はここが完全にロックフリーで、同一音源を使う
+    //    複数ノートが並列ワーカーに割り当たると Harvest/CheapTrick/D4C の
+    //    重複実行や、save_cache() の一時ファイル書き込み競合
+    //    （ファイル破損の可能性）が起こり得た。per-keyロックで
+    //    「他キーの処理は並列のまま、同一キーだけ直列化」する。
+    auto key_lock = g_analysis_lock_registry.get_lock(key);
+    std::lock_guard<std::mutex> lg(*key_lock);
+
+    // ロック取得を待っている間に他スレッドが解析を完了させている
+    // 可能性があるため、ロック取得後にもう一度メモリキャッシュを確認する。
+    {
+        auto cached = g_analysis_cache.get(key);
+        if (cached) return cached;
+    }
+
+    // 3. ディスクキャッシュ読み込み（キーロック内）
     const std::string cache_file = get_cache_dir() + "/" + generate_cache_hash(key) + ".vsc";
     auto disk_cache = load_cache(cache_file, spec_bins);
     if (disk_cache) {
@@ -685,12 +737,12 @@ get_or_analyze(std::shared_ptr<const EmbeddedVoice> ev_sp, int fft_size, int spe
         return disk_cache;
     }
 
-    // 3. 新規解析（ロック外、重い処理）
+    // 4. 新規解析（キーロック内。ただし他キーの解析はブロックしない）
     auto cache = build_analysis_cache(*ev_sp, fft_size, spec_bins);
 
-    // 4. メモリキャッシュに書き込み
+    // 5. メモリキャッシュに書き込み
     g_analysis_cache.put(key, cache);
-    save_cache(cache_file, *cache);  // ディスク保存（ロック外でOK）
+    save_cache(cache_file, *cache);  // ディスク保存（同一キーでは直列化済み）
     return cache;
 }
 // ============================================================
@@ -1329,21 +1381,29 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
         }
         auto ev = find_voice_ref(notes[i].wav_path);
 
-        const OtoEntry* found_oto = nullptr;
+        // [修正] found_oto は以前 g_oto_db 内部要素への生ポインタを
+        // ロック解放後まで持ち出していた。set_oto_data() は g_oto_db を
+        // clear() して再構築するため、ロック解放後にこのポインタを
+        // dereference する窓（NotePrepass構築時）で use-after-free の
+        // 可能性があった。ロック内で値コピーを確定させ、ロック外では
+        // ローカル変数 found_oto（実体）だけを参照するように変更。
+        OtoEntry found_oto{};
+        bool     has_found_oto = false;
         {
             VoseUniqueLock lock(g_oto_db_mutex);
             auto oto_it = g_oto_db.find(notes[i].wav_path);
             if (oto_it != g_oto_db.end()) {
-                found_oto = &oto_it->second;
+                found_oto     = oto_it->second;   // 値コピー（ロック内で確定）
+                has_found_oto = true;
                 max_preutterance = std::max(max_preutterance,
-                                            found_oto->preutterance);
+                                            found_oto.preutterance);
             }
         }
 
         if (ev) {
             prepass[i] = NotePrepass(NoteState::RENDERABLE, ns, ev,
                                      prev_renderable ? last_ev : nullptr,
-                                     found_oto);
+                                     has_found_oto ? &found_oto : nullptr);
             if (prev_renderable) ++xfade_count;
             prev_renderable = true;
             last_ev         = ev;
@@ -1432,21 +1492,50 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
     const int total_renderable = static_cast<int>(renderable_indices.size());
     bool cancelled_during_synth = false;
 
+    bool failed_during_synth = false;
+
     if (total_renderable > 0) {
-        std::atomic<int> next_task{0};
-        std::atomic<int> completed{0};
+        std::atomic<int>  next_task{0};
+        std::atomic<int>  completed{0};
         std::atomic<bool> cancel_flag{false};
+
+        // [修正] 以前は synthesize_note_impl() が投げうる例外
+        // （std::bad_alloc、WORLDライブラリ内部の例外等）をワーカー
+        // スレッド内で一切捕捉していなかった。スレッド関数から例外が
+        // 漏れると std::terminate() が呼ばれ、プロセス全体が即座に
+        // 落ちてしまう。ここで try/catch し、失敗を worker_failed で
+        // 記録した上で他のワーカーにも早期終了させ、メインスレッド側で
+        // 安全にレンダリングを打ち切れるようにする。
+        std::atomic<bool> worker_failed{false};
+        std::string       worker_error_msg;
+        std::mutex        worker_error_mutex;
 
         auto worker_fn = [&]() {
             for (;;) {
                 if (cancel_flag.load(std::memory_order_relaxed)) return;
+                if (worker_failed.load(std::memory_order_relaxed)) return;
+
                 const int bi = next_task.fetch_add(1, std::memory_order_relaxed);
                 if (bi >= total_renderable) return;
 
                 const int idx = renderable_indices[bi];
-                SynthNoteParams p{ prepass[idx], notes[idx], fft_size, spec_bins,
-                                   note_global_time[idx] };
-                synthesize_note_impl(p, note_bufs[idx]);
+                try {
+                    SynthNoteParams p{ prepass[idx], notes[idx], fft_size, spec_bins,
+                                       note_global_time[idx] };
+                    synthesize_note_impl(p, note_bufs[idx]);
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> elg(worker_error_mutex);
+                    if (!worker_failed.exchange(true, std::memory_order_relaxed))
+                        worker_error_msg = e.what();
+                    cancel_flag.store(true, std::memory_order_relaxed);
+                    return;
+                } catch (...) {
+                    std::lock_guard<std::mutex> elg(worker_error_mutex);
+                    if (!worker_failed.exchange(true, std::memory_order_relaxed))
+                        worker_error_msg = "unknown exception";
+                    cancel_flag.store(true, std::memory_order_relaxed);
+                    return;
+                }
 
                 completed.fetch_add(1, std::memory_order_relaxed);
             }
@@ -1458,8 +1547,14 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
         for (int i = 0; i < worker_count; ++i)
             workers.emplace_back(worker_fn);
 
-        // メインスレッドは進捗通知とキャンセル監視に専念する
+        // メインスレッドは進捗通知とキャンセル監視に専念する。
+        // worker_failed も終了条件に含めないと、例外発生時に completed が
+        // total_renderable に到達しないままこのループが回り続けてしまう。
         while (completed.load(std::memory_order_relaxed) < total_renderable) {
+            if (worker_failed.load(std::memory_order_relaxed)) {
+                cancelled_during_synth = true; // 以降のパス2-Bをスキップさせる
+                break;
+            }
             if (is_cancelled()) {
                 cancel_flag.store(true, std::memory_order_relaxed);
                 cancelled_during_synth = true;
@@ -1474,9 +1569,15 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
 
         for (auto& t : workers) t.join();
 
-        if (!cancelled_during_synth) report_progress(80);
+        if (worker_failed.load(std::memory_order_relaxed)) {
+            failed_during_synth = true;
+            fprintf(stderr, "[Render] Worker thread failed: %s\n", worker_error_msg.c_str());
+        } else if (!cancelled_during_synth) {
+            report_progress(80);
+        }
     }
 
+    if (failed_during_synth) return; // 例外発生時はレンダリングを中断（wavwriteしない）
     if (cancelled_during_synth || is_cancelled()) return;
 
     // ----------------------------------------------------------------

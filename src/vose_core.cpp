@@ -1,13 +1,5 @@
 //vose_core.cpp
 //合成メインエンジン
-// --- clamp polyfill (for C++14/macOS libc++) ---
-#ifndef HAVE_STD_CLAMP
-template <typename T>
-constexpr const T& clamp(const T& v, const T& lo, const T& hi) {
-    return (v < lo) ? lo : (hi < v) ? hi : v;
-}
-#endif
-
 
 #include <vector>
 #include <string>
@@ -24,17 +16,39 @@ constexpr const T& clamp(const T& v, const T& lo, const T& hi) {
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
+#include <cerrno>
 #include <future>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
 #include <memory>
 #include <shared_mutex>
+#include <atomic>
+#include <chrono>
 
+// --- clamp polyfill (for C++14/macOS libc++) ---
+// [修正] <algorithm> を読み込んだ「後」に判定する。
+// __cpp_lib_clamp は <algorithm> が C++17 以降でのみ定義するフィーチャーテストマクロなので、
+// これより前に判定すると常に「未定義」扱いになり、std::clamp が使える環境でも
+// 独自 clamp() を定義してしまい、コード中で std::clamp と bare clamp が混在する
+// 原因になっていた（名前解決の予期せぬ挙動の温床）。
+// ここで一本化し、以降は常に無名前空間の clamp(...) を使う。
+#if defined(__cpp_lib_clamp)
+using std::clamp;
+#else
+template <typename T>
+constexpr const T& clamp(const T& v, const T& lo, const T& hi) {
+    return (v < lo) ? lo : (hi < v) ? hi : v;
+}
+#endif
 
 // 先に型定義を完了させ、ONNXセッション側での未定義エラーを防ぐ
 using VoseMutex = std::mutex;
 using VoseUniqueLock = std::unique_lock<std::mutex>;
+// BigVGANセッションのポインタ差し替え（set_bigvgan_model）と
+// 推論実行（execute_render_impl内のRun呼び出し）を安全に共存させるための
+// 読み書きロック。差し替えは排他、推論実行時は共有ロックで読む。
+using VoseSharedMutex = std::shared_mutex;
 
 // --- Windows (MSVC) と POSIX (macOS/Linux) のクロスプラットフォーム吸収マクロ ---
 #if defined(_WIN32) || defined(_WIN64)
@@ -65,7 +79,7 @@ using VoseUniqueLock = std::unique_lock<std::mutex>;
 #ifdef VOSE_PRO
 #include <onnxruntime_cxx_api.h>
 static std::unique_ptr<Ort::Session> g_bigvgan_session;
-static VoseMutex                     g_bigvgan_mutex; // 前方で定義済みのため安全
+static VoseSharedMutex               g_bigvgan_mutex; // 前方で定義済みのため安全
 #endif
 
 #include "vose_core.h"
@@ -143,8 +157,71 @@ struct EmbeddedVoice {
     int                 fs;
 };
 
-static std::map<std::string, std::shared_ptr<const EmbeddedVoice>> g_voice_db;
-VoseMutex g_voice_db_mutex;
+// ============================================================
+// VoiceDbStore — LRU エビクション付き音源波形キャッシュ
+//
+// 問題: 従来の g_voice_db (std::map) には上限がなく、長時間セッションで
+//   多数の音源ファイル/エンベッドボイスを読み込むと、波形データ
+//   (EmbeddedVoice::waveform) がメモリ上に無制限に蓄積し続けていた。
+//   clear_engine_cache() を明示的に呼ばない限り解放されない。
+//
+// 解決: g_analysis_cache と同じ LRU パターンを適用し、
+//   最大エントリ数 kMaxEntries を超えたら最も使われていない音源を追い出す。
+// ============================================================
+class VoiceDbStore {
+    using Key   = std::string;
+    using Value = std::shared_ptr<const EmbeddedVoice>;
+
+    // 音源1件あたりのサイズは波形長に依存し様々だが、通常の音源集
+    // （数百〜数千音素）を想定した上限。必要ならビルド時に調整可能。
+    static constexpr size_t kMaxEntries = 256;
+
+    mutable std::shared_mutex mtx;
+    std::list<std::pair<Key, Value>> lru_list;
+    std::unordered_map<Key, std::list<std::pair<Key, Value>>::iterator> index;
+
+public:
+    Value get(const Key& key) {
+        std::unique_lock<std::shared_mutex> lock(mtx); // splice は変更操作のため排他ロック
+        auto it = index.find(key);
+        if (it == index.end()) return nullptr;
+        lru_list.splice(lru_list.begin(), lru_list, it->second);
+        return it->second->second;
+    }
+
+    void put(const Key& key, const Value& val) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        auto it = index.find(key);
+        if (it != index.end()) {
+            lru_list.erase(it->second);
+            index.erase(it);
+        }
+        lru_list.push_front({key, val});
+        index[key] = lru_list.begin();
+
+        while (index.size() > kMaxEntries) {
+            auto last = std::prev(lru_list.end());
+            index.erase(last->first);
+            lru_list.pop_back();
+        }
+    }
+
+    void erase(const Key& key) {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        auto it = index.find(key);
+        if (it == index.end()) return;
+        lru_list.erase(it->second);
+        index.erase(it);
+    }
+
+    void clear() {
+        std::unique_lock<std::shared_mutex> lock(mtx);
+        lru_list.clear();
+        index.clear();
+    }
+};
+
+static VoiceDbStore g_voice_db;
 
 struct AnalysisCache {
     std::vector<double> f0;
@@ -384,9 +461,8 @@ static int64_t note_samples_safe(int p) {
 std::shared_ptr<const EmbeddedVoice> find_voice_ref(const char* key)
 {
     {
-        VoseUniqueLock lock(g_voice_db_mutex);
-        auto it = g_voice_db.find(key ? key : "");
-        if (it != g_voice_db.end()) return it->second;
+        auto cached = g_voice_db.get(key ? key : "");
+        if (cached) return cached;
     }
     
     // Fallback: load from disk (MEMFS)
@@ -399,8 +475,7 @@ std::shared_ptr<const EmbeddedVoice> find_voice_ref(const char* key)
             ev->waveform.resize(audio_len);
             wavread(key, &ev->fs, &nbit, ev->waveform.data());
             
-            VoseUniqueLock lock(g_voice_db_mutex);
-            g_voice_db[key] = ev;
+            g_voice_db.put(key, ev);
             return ev;
         }
     }
@@ -427,7 +502,11 @@ static void save_cache(const std::string& cache_path, const AnalysisCache& cache
     std::string tmp_path = cache_path + ".tmp";
 
     FILE* fp = fopen(tmp_path.c_str(), "wb");
-    if (!fp) return;
+    if (!fp) {
+        fprintf(stderr, "[Cache] Failed to open temp cache file for writing: %s (errno=%d)\n",
+                tmp_path.c_str(), errno);
+        return;
+    }
 
     bool ok = true;
     VoseCacheHeader header;
@@ -444,11 +523,19 @@ static void save_cache(const std::string& cache_path, const AnalysisCache& cache
     fclose(fp);
 
     if (ok) {
-        std::error_code ec;
-        rename(tmp_path.c_str(), cache_path.c_str());  // アトミック置換
-        // 失敗時はtmpファイルを削除
-        // (rename失敗時のエラー処理は省略)
+        // [修正] 以前は std::error_code を宣言していたが、ここで使っている
+        // rename() は C標準ライブラリ版（<cstdio>）であり std::error_code は
+        // 一切渡されておらず死んだ変数だった。加えて rename() の戻り値も
+        // 確認しておらず、失敗（例: 権限不足やディスクフル）しても気づかず
+        // 中途半端な .tmp ファイルが残り続けていた。
+        // ここで戻り値を確認し、失敗時はログを出した上で .tmp を掃除する。
+        if (std::rename(tmp_path.c_str(), cache_path.c_str()) != 0) {
+            fprintf(stderr, "[Cache] Failed to rename %s -> %s (errno=%d)\n",
+                    tmp_path.c_str(), cache_path.c_str(), errno);
+            unlink(tmp_path.c_str());
+        }
     } else {
+        fprintf(stderr, "[Cache] Failed to write cache data to %s\n", tmp_path.c_str());
         unlink(tmp_path.c_str());  // 書き込み失敗なら一時ファイルを削除
     }
 }
@@ -1153,11 +1240,10 @@ DLLEXPORT void load_embedded_resource(const char* phoneme,
         ev->waveform[i] = static_cast<double>(raw_data[i]) * kInv32768;
 
     VoseUniqueLock clock(g_analysis_cache_mutex);
-    VoseUniqueLock wlock(g_voice_db_mutex);
     // パス文字列キーでキャッシュを無効化（再ロード時も確実にヒット）
     g_analysis_cache.erase(phoneme);
     ev->path = phoneme;
-    g_voice_db[phoneme] = std::move(ev);
+    g_voice_db.put(phoneme, std::move(ev));
 }
 
 // ============================================================
@@ -1282,20 +1368,34 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
         static_cast<int64_t>(max_preutterance * kFs / 1000.0);
     const int64_t buffer_total = total_samples + pre_buffer_samples;
 
-    tl_scratch.ensure_spec(max_harvest_len, spec_bins);
+    // [修正] 以前ここで tl_scratch.ensure_spec(max_harvest_len, spec_bins) を
+    // 呼んでいたが、これはメインスレッド自身の thread_local スクラッチを
+    // 事前確保するだけで、実際の合成は常にワーカースレッド側で行われるため
+    // 効果がなかった（呼び出し元スレッドは合成に参加しない）。無意味な
+    // 呼び出しだったため削除した。max_harvest_len 自体は今後デバッグ/
+    // ログ用途で使う可能性があるため計算だけ残す。
+    (void)max_harvest_len;
     std::vector<double> full_song_buffer(buffer_total, 0.0);
 
     // ----------------------------------------------------------------
     // パス2-A: 各ノートの note_buf を並列合成
     //
-    // 設計上の注意:
-    //   tl_scratch は thread_local なので「スレッドごとに独立」だが、
-    //   std::async(launch::async) は実装によってスレッドプールを再利用する。
-    //   同じスレッドが2ノード分の synthesize_note_impl を
-    //   ネストして呼び出すことはないが、プールの枯渇で
-    //   launch::deferred（= メインスレッドで実行）に fallback する実装もある。
-    //   安全のため、1ノート = 1スレッドを明示的に生成する方式にする。
-    //   スレッド数は hardware_concurrency でキャップし、バッチ処理する。
+    // [修正] 以前の実装はバッチ単位（max_threads件ずつ）で std::thread を
+    //   毎回新規生成しては join していた。tl_scratch は thread_local だが、
+    //   スレッド自体がバッチごとに使い捨てられるため、各ノートは常に
+    //   「reserved_f0=0 / reserved_bins=0」の状態から scratch を確保し直す
+    //   ことになり、SynthesisScratchPad::ensure_spec() が意図していた
+    //   「一度確保したら使い回す」という最適化がほぼ機能していなかった。
+    //
+    //   ここでは hardware_concurrency 個のワーカースレッドを合成フェーズの
+    //   開始時に1回だけ生成し、全ノートの処理が終わるまで生存させる
+    //   「永続ワーカープール」方式に変更する。各ワーカーは共有カウンタ
+    //   (next_task) から次に処理すべきノート番号を取り出して処理する。
+    //   これにより同一スレッドが複数ノートを連続して処理するようになり、
+    //   tl_scratch のバッファ再利用が実際に効くようになる。
+    //
+    //   full_song_bufferへは誰も書き込まず、note_bufs[idx] への書き込みは
+    //   ノートごとに一意なので、これまで通りデータ競合はない。
     // ----------------------------------------------------------------
     const int max_threads = static_cast<int>(
         std::max(1u, std::thread::hardware_concurrency()));
@@ -1320,45 +1420,61 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
         }
     }
 
-    // max_threads ずつバッチ処理
-    // 各スレッドは独立した tl_scratch（thread_local）を持つため競合しない
-    //
     // 進捗・キャンセルについて:
-    //   このバッチループが全体の処理時間の大半（合成フェーズ）を占めるため、
-    //   ここでバッチ単位に進捗を通知し、キャンセル要求もここでチェックする。
+    //   合成フェーズが全体の処理時間の大半を占めるため、
+    //   完了済みノート数をポーリングして進捗を通知し、キャンセル要求も
+    //   ここでチェックする。コールバックは常にこのメインスレッド側からのみ
+    //   呼び出す（ワーカースレッドからは直接呼ばない）ことで、
+    //   Python(ctypes) 側に渡されたコールバックがスレッドセーフでなくても
+    //   安全に扱えるようにする。
     //   進捗レンジは 2%〜80% を合成フェーズに割り当てる
     //   （0-2%: 準備, 80-95%: 書き込み/後処理, 95-100%: wavwrite）。
     const int total_renderable = static_cast<int>(renderable_indices.size());
     bool cancelled_during_synth = false;
 
-    for (int batch_start = 0;
-         batch_start < total_renderable;
-         batch_start += max_threads)
-    {
-        if (is_cancelled()) { cancelled_during_synth = true; break; }
+    if (total_renderable > 0) {
+        std::atomic<int> next_task{0};
+        std::atomic<int> completed{0};
+        std::atomic<bool> cancel_flag{false};
 
-        const int batch_end = std::min(
-            batch_start + max_threads,
-            total_renderable);
+        auto worker_fn = [&]() {
+            for (;;) {
+                if (cancel_flag.load(std::memory_order_relaxed)) return;
+                const int bi = next_task.fetch_add(1, std::memory_order_relaxed);
+                if (bi >= total_renderable) return;
 
-        std::vector<std::thread> threads;
-        threads.reserve(batch_end - batch_start);
-
-        for (int bi = batch_start; bi < batch_end; ++bi) {
-            const int idx = renderable_indices[bi];
-            threads.emplace_back([&, idx] {
+                const int idx = renderable_indices[bi];
                 SynthNoteParams p{ prepass[idx], notes[idx], fft_size, spec_bins,
                                    note_global_time[idx] };
                 synthesize_note_impl(p, note_bufs[idx]);
-            });
-        }
-        for (auto& t : threads) t.join();
 
-        if (total_renderable > 0) {
-            const int pct = 2 + static_cast<int>(
-                (static_cast<double>(batch_end) / total_renderable) * 78.0);
+                completed.fetch_add(1, std::memory_order_relaxed);
+            }
+        };
+
+        const int worker_count = std::min(max_threads, total_renderable);
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        for (int i = 0; i < worker_count; ++i)
+            workers.emplace_back(worker_fn);
+
+        // メインスレッドは進捗通知とキャンセル監視に専念する
+        while (completed.load(std::memory_order_relaxed) < total_renderable) {
+            if (is_cancelled()) {
+                cancel_flag.store(true, std::memory_order_relaxed);
+                cancelled_during_synth = true;
+                break;
+            }
+            const int done = completed.load(std::memory_order_relaxed);
+            const int pct  = 2 + static_cast<int>(
+                (static_cast<double>(done) / total_renderable) * 78.0);
             report_progress(std::min(pct, 80));
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
         }
+
+        for (auto& t : workers) t.join();
+
+        if (!cancelled_during_synth) report_progress(80);
     }
 
     if (cancelled_during_synth || is_cancelled()) return;
@@ -1438,13 +1554,19 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
         const int     n_src = static_cast<int>(total_samples);
 
 #ifdef VOSE_PRO
+        // [修正] set_bigvgan_model() によるセッション差し替え（reset/再生成）と
+        // ここでの読み取り・Run() 呼び出しが無保護で競合していた（UAFの危険）。
+        // 共有ロックを取ることで、差し替え中はここに進めないようにする。
+        // ロックは Run() を含むブロック全体にかける（差し替えが完了するまで
+        // 古いセッションの生存を保証する必要があるため）。
+        std::shared_lock<VoseSharedMutex> bigvgan_read_lock(g_bigvgan_mutex);
         if (g_bigvgan_session && n_src > 0) {
             // ----------------------------------------------------------
             // ステップ1: double → float 正規化
             // ----------------------------------------------------------
             std::vector<float> pcm(n_src);
             for (int i = 0; i < n_src; ++i)
-                pcm[i] = static_cast<float>(std::clamp(src[i], -1.0, 1.0));
+                pcm[i] = static_cast<float>(clamp(src[i], -1.0, 1.0));
 
             // ----------------------------------------------------------
             // ステップ2: メルスペクトログラム変換
@@ -1645,7 +1767,7 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
             // ----------------------------------------------------------
             std::vector<double> bigvgan_out(n_src);
             for (int i = 0; i < n_src; ++i)
-                bigvgan_out[i] = std::clamp(static_cast<double>(out_pcm[i]), -1.0, 1.0);
+                bigvgan_out[i] = clamp(static_cast<double>(out_pcm[i]), -1.0, 1.0);
 
             report_progress(95);
             if (is_cancelled()) return;
@@ -1711,10 +1833,7 @@ DLLEXPORT float get_engine_version(void)
 // 音声データベース／解析キャッシュをクリアする
 DLLEXPORT void clear_engine_cache(void)
 {
-    {
-        VoseUniqueLock lock(g_voice_db_mutex);
-        g_voice_db.clear();
-    }
+    g_voice_db.clear();
     {
         std::lock_guard<std::mutex> lock(g_analysis_cache_mutex);
         g_analysis_cache.clear();
@@ -1769,7 +1888,9 @@ static std::wstring utf8_to_wstring(const char* utf8_str) {
 // path が nullptr または空なら BigVGAN を無効化する
 extern "C" DLLEXPORT void set_bigvgan_model(const char* onnx_path) {
 #ifdef VOSE_PRO
-    std::lock_guard<VoseMutex> lk(g_bigvgan_mutex);
+    // 排他ロック: モデル差し替え中は推論側（execute_render_impl）の
+    // 共有ロック取得をブロックし、差し替え完了後の一貫した状態のみを読ませる。
+    std::unique_lock<VoseSharedMutex> lk(g_bigvgan_mutex);
     if (!onnx_path || onnx_path[0] == '\0') {
         g_bigvgan_session.reset();
         return;

@@ -140,7 +140,13 @@ static std::string generate_cache_hash(const std::string& wav_path) {
 std::map<std::string, OtoEntry> g_oto_db;
 VoseMutex g_oto_db_mutex;
 
-extern "C" void set_oto_data(const OtoEntry* entries, int count) {
+// [修正] 元のコードにはDLLEXPORTが付いておらず、Windows(.dll)からは
+// GetProcAddress("set_oto_data")で解決できなかった(=呼び出し不能)バグが
+// あった。OtoEntry(音源のタイミング情報)を外部から設定できないと、
+// エンベッド音源以外の実ファイル音源を正しく扱えないため、他のAPI関数
+// (load_embedded_resource等)と同じくDLLEXPORTを付与する。
+// あわせて include/vose_core.h 側の extern "C" ブロックにも宣言を追加すること。
+extern "C" DLLEXPORT void set_oto_data(const OtoEntry* entries, int count) {
     VoseUniqueLock lock(g_oto_db_mutex);
     g_oto_db.clear();
     if (!entries || count <= 0) return;
@@ -689,10 +695,23 @@ build_analysis_cache(const EmbeddedVoice& ev, int fft_size, int spec_bins)
         sp[i] = &cache->flat_spec[static_cast<size_t>(i)*spec_bins];
         ap[i] = &cache->flat_ap  [static_cast<size_t>(i)*spec_bins];
     }
+
+    // [修正] 元のコードは CheapTrick()/D4C() に option として nullptr を
+    // 直接渡しており、両関数とも内部で option->f0_floor / option->threshold
+    // 等を無条件に参照するため、確実にセグメンテーション違反を起こしていた
+    // (Harvestは数行上で InitializeHarvestOption() を正しく呼んでいるのに、
+    // これだけ同じパターンが抜けていた)。WORLDの一般的な使い方に合わせ、
+    // Initialize*Option() で構造体を初期化してからポインタを渡す。
+    CheapTrickOption cheaptrick_opt;
+    InitializeCheapTrickOption(ev.fs, &cheaptrick_opt);
+
+    D4COption d4c_opt;
+    InitializeD4COption(&d4c_opt);
+
     CheapTrick(ev.waveform.data(), wav_len, ev.fs,
-               cache->time.data(), cache->f0.data(), harvest_len, nullptr, sp.data());
+               cache->time.data(), cache->f0.data(), harvest_len, &cheaptrick_opt, sp.data());
     D4C(ev.waveform.data(), wav_len, ev.fs,
-        cache->time.data(), cache->f0.data(), harvest_len, fft_size, nullptr, ap.data());
+        cache->time.data(), cache->f0.data(), harvest_len, fft_size, &d4c_opt, ap.data());
 
     return cache;
 }
@@ -1348,7 +1367,13 @@ static void execute_render_impl(NoteEvent* notes, int note_count, const char* ou
     // 最後の wavwrite 前にリサンプリング処理を挟みます。
     int out_fs = kFs; 
 
-    const int fft_size  = GetFFTSizeForCheapTrick(kFs, nullptr);
+    // [修正] 元のコードは nullptr を直接渡しており、GetFFTSizeForCheapTrick内部で
+    // option->f0_floor を無条件参照するため確実にクラッシュしていた。
+    // build_analysis_cache側と同じく、InitializeCheapTrickOption()で
+    // 初期化してから渡す。
+    CheapTrickOption default_ct_opt;
+    InitializeCheapTrickOption(kFs, &default_ct_opt);
+    const int fft_size  = GetFFTSizeForCheapTrick(kFs, &default_ct_opt);
     const int spec_bins = fft_size / 2 + 1;
 
     // ----------------------------------------------------------------

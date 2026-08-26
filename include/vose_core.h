@@ -65,6 +65,11 @@ struct NoteEvent {
 struct OtoEntry; // 前方宣言
 
 extern "C" {
+    // 0. 音源のタイミング情報(oto.ini相当)を設定する。
+    //    エンベッド音源のみを使う場合は呼ばなくても動作するが、実ファイル
+    //    音源のオフセット/子音固定/ブランク等を正しく扱うには必須。
+    DLLEXPORT void set_oto_data(const OtoEntry* entries, int count);
+
     // 1. 音源をメモリにパッキングする（内蔵音源化の必須関数）
     DLLEXPORT void load_embedded_resource(const char* phoneme, const int16_t* raw_data, int sample_count);
 

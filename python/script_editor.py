@@ -23,8 +23,9 @@ import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QUrl
 from PySide6.QtGui import QColor, QPainter, QFont, QBrush, QPen
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -42,6 +43,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    from vose_worker import start_synthesis
+    _VOSE_AVAILABLE = True
+except ImportError:
+    _VOSE_AVAILABLE = False
 
 
 # --- 話者読み上げ速度の概算値(日本語, 文字/秒) ---
@@ -288,12 +295,24 @@ class ScriptEditorPanel(QWidget):
 
     PLAYBACK_TICK_MS = 50
 
-    def __init__(self) -> None:
+    def __init__(self, vose_lib_path: str | None = None) -> None:
         super().__init__()
 
         self.model = ScriptModel()
         self._playback_elapsed_sec = 0.0
         self._is_previewing = False
+
+        # --- VO-SE音声合成まわりの状態 ---
+        self._vose_lib_path = vose_lib_path
+        self._synth_thread = None
+        self._synth_wav_paths: dict[str, str] = {}   # line_id -> wavファイルパス
+        self._playback_queue: list[str] = []          # 再生待ちのline_idキュー
+        self._synth_pending_count = 0
+
+        self.audio_output = QAudioOutput()
+        self.media_player = QMediaPlayer()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
 
         self.transcript = TranscriptWidget(self.model)
         self.chat_input = ChatInputWidget(self.model)
@@ -324,6 +343,14 @@ class ScriptEditorPanel(QWidget):
         self.preview_button = QPushButton("▶ 台本プレビュー再生")
         self.preview_button.clicked.connect(self.toggle_preview_playback)
 
+        self.synth_button = QPushButton("🔊 音声合成して再生")
+        self.synth_button.clicked.connect(self.start_voice_synthesis)
+        self.synth_button.setEnabled(_VOSE_AVAILABLE)
+        if not _VOSE_AVAILABLE:
+            self.synth_button.setToolTip("vose_worker(VO-SEエンジン連携)が利用できません")
+
+        self.synth_status_label = QLabel("")
+
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(self.PLAYBACK_TICK_MS)
         self.playback_timer.timeout.connect(self._advance_playback)
@@ -336,6 +363,8 @@ class ScriptEditorPanel(QWidget):
         toolbar.addWidget(save_button)
         toolbar.addWidget(load_button)
         toolbar.addWidget(self.preview_button)
+        toolbar.addWidget(self.synth_button)
+        toolbar.addWidget(self.synth_status_label)
         toolbar.addStretch(1)
         toolbar.addWidget(self.duration_label)
 
@@ -356,6 +385,80 @@ class ScriptEditorPanel(QWidget):
             self.stop_preview_playback()
         else:
             self.start_preview_playback()
+
+    # --- VO-SE音声合成 + 順次再生 ---
+
+    def start_voice_synthesis(self) -> None:
+        if not _VOSE_AVAILABLE:
+            QMessageBox.warning(self, "音声合成", "vose_worker(VO-SEエンジン連携)が利用できません。")
+            return
+        if not self.model.lines:
+            return
+        if self._synth_thread is not None:
+            return  # 既に合成中
+
+        self.synth_button.setEnabled(False)
+        self.synth_status_label.setText("合成中... (0/{})".format(len(self.model.lines)))
+
+        self._synth_wav_paths.clear()
+        self._playback_queue.clear()
+        self._synth_pending_count = len(self.model.lines)
+
+        lines = [(line.line_id, line.text) for line in self.model.lines]
+        self._synth_thread = start_synthesis(
+            self._vose_lib_path,
+            lines,
+            on_line_ready=self._on_synth_line_ready,
+            on_line_failed=self._on_synth_line_failed,
+            on_all_finished=self._on_synth_all_finished,
+        )
+
+    def _on_synth_line_ready(self, line_id: str, wav_path: str) -> None:
+        self._synth_wav_paths[line_id] = wav_path
+        self._playback_queue.append(line_id)
+        self._synth_pending_count -= 1
+        self.synth_status_label.setText(
+            "合成中... ({}/{})".format(len(self.model.lines) - self._synth_pending_count, len(self.model.lines))
+        )
+        # 再生キューが空(=何も再生していない)状態なら、この行から再生を始める
+        if self.media_player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self._play_next_in_queue()
+
+    def _on_synth_line_failed(self, line_id: str, error_message: str) -> None:
+        self._synth_pending_count -= 1
+        print(f"[音声合成エラー] line_id={line_id}: {error_message}")
+
+    def _on_synth_all_finished(self) -> None:
+        self.synth_button.setEnabled(True)
+        self.synth_status_label.setText("")
+        if self._synth_thread is not None:
+            # run()は既に返っているはずだが、QThreadオブジェクトを破棄する前に
+            # 必ずwait()でOSスレッドの終了を確定させる(Qtの既定動作)。
+            self._synth_thread.wait()
+        self._synth_thread = None
+
+    def _play_next_in_queue(self) -> None:
+        if not self._playback_queue:
+            return
+        line_id = self._playback_queue.pop(0)
+        wav_path = self._synth_wav_paths.get(line_id)
+        if not wav_path:
+            self._play_next_in_queue()
+            return
+
+        line = next((l for l in self.model.lines if l.line_id == line_id), None)
+        if line:
+            self.telop_changed.emit(line.text)
+
+        self.media_player.setSource(QUrl.fromLocalFile(wav_path))
+        self.media_player.play()
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            if self._playback_queue:
+                self._play_next_in_queue()
+            else:
+                self.telop_changed.emit("")  # 再生キューを使い切ったらテロップを消す
 
     def start_preview_playback(self) -> None:
         if not self.model.lines:
@@ -431,17 +534,22 @@ class ScriptEditorPanel(QWidget):
     def cleanup(self) -> None:
         """ウィンドウが閉じられる際に呼び出す。"""
         self.playback_timer.stop()
+        self.media_player.stop()
+        if self._synth_thread is not None:
+            self._synth_thread.cancel()
+            self._synth_thread.quit()
+            self._synth_thread.wait(3000)
 
 
 class ScriptEditorWindow(QMainWindow):
     """ScriptEditorPanelを単体で動かすための簡易ウィンドウ(動作確認用)。"""
 
-    def __init__(self) -> None:
+    def __init__(self, vose_lib_path: str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("aural Studio - 台本エディタ")
         self.resize(900, 600)
 
-        self.panel = ScriptEditorPanel()
+        self.panel = ScriptEditorPanel(vose_lib_path)
         self.setCentralWidget(self.panel)
 
     # ScriptEditorWindow.model / on_line_submitted 等への既存アクセス(テスト等)

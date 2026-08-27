@@ -79,3 +79,32 @@ target_include_directories(aural_engine PRIVATE
 )
 target_link_directories(aural_engine PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural_engine PRIVATE ${FFMPEG_LIBRARIES})
+
+# --- vose_core: VO-SE音声合成エンジン(WORLDボコーダーベース) ---
+# Python側からはctypes(python/vose_engine.py)経由で呼び出す。
+# BigVGAN(ニューラルボコーダー後段)はONNX Runtimeへの依存が増えるため、
+# ここではFreeティール相当(VOSE_PRO未定義、WORLD直接出力のみ)としてビルドする。
+# Proティール(BigVGAN有効)が必要になったら、VOSE_PROを定義し、
+# find_package等でonnxruntimeを解決した上でリンクを追加すること。
+file(GLOB VOSE_WORLD_SOURCES ${CMAKE_SOURCE_DIR}/src/world/*.cpp)
+
+add_library(vose_core SHARED
+    src/vose_core.cpp
+    ${VOSE_WORLD_SOURCES}
+)
+
+target_include_directories(vose_core PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/include/world
+)
+
+find_package(Threads REQUIRED)
+target_link_libraries(vose_core PRIVATE Threads::Threads)
+
+# 拡張子・prefixをプラットフォーム標準に合わせつつ、Python(ctypes)側の
+# デフォルト読み込みパス(python/vose_engine.pyの_default_lib_name)と
+# 名前が一致するようにする。
+set_target_properties(vose_core PROPERTIES
+    PREFIX "lib"
+    OUTPUT_NAME "vose_core"
+)

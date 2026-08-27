@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import platform
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -27,6 +29,19 @@ from preview import PreviewPanel
 from script_editor import ScriptEditorPanel
 
 
+def _default_vose_lib_path() -> str | None:
+    """CMakeビルドで生成されるlibvose_core(.so/.dylib/.dll)を、このファイルから
+    見て ../build/ 相対で探す。見つからなければNoneを返す(音声合成ボタンは
+    無効化された状態でGUIは起動できる)。
+    """
+    system = platform.system()
+    filename = {"Windows": "vose_core.dll", "Darwin": "libvose_core.dylib"}.get(system, "libvose_core.so")
+
+    build_dir = Path(__file__).resolve().parent.parent / "build"
+    candidate = build_dir / filename
+    return str(candidate) if candidate.exists() else None
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -36,7 +51,7 @@ class MainWindow(QMainWindow):
         self.preview_panel = PreviewPanel()
         self.setCentralWidget(self.preview_panel)
 
-        self.script_panel = ScriptEditorPanel()
+        self.script_panel = ScriptEditorPanel(_default_vose_lib_path())
         self.script_dock = QDockWidget("台本エディタ", self)
         self.script_dock.setWidget(self.script_panel)
         self.script_dock.setFeatures(

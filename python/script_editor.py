@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from vose_worker import start_synthesis
+    from vose_worker import SynthesisLine, start_synthesis
     _VOSE_AVAILABLE = True
 except ImportError:
     _VOSE_AVAILABLE = False
@@ -63,6 +63,12 @@ MIN_ESTIMATED_DURATION_SEC = 0.8
 class Speaker:
     name: str
     color: str  # "#RRGGBB"
+    # "openjtalk": 素の読み上げ(pyopenjtalk.tts()を直接使う、VO-SE非経由)。
+    # それ以外の値: UTAU形式ボイスバンクの識別子として扱い、VO-SE(vose_core)
+    # 経由で合成する。歌声合成(旧ロードマップの「[歌唱]タグ連携」相当)は
+    # VO-SE自体の機能と重複するため、専用タグとしては別立てせず、話者に
+    # UTAU音源を割り当てるだけで自然に扱えるようにしている。
+    voice_source: str = "openjtalk"
 
 
 @dataclass
@@ -83,14 +89,14 @@ class ScriptModel:
 
     def __init__(self) -> None:
         self.speakers: list[Speaker] = [
-            Speaker(name="ナレーター", color="#4A90D9"),
-            Speaker(name="キャラA", color="#D94A4A"),
-            Speaker(name="キャラB", color="#4AD97A"),
+            Speaker(name="ナレーター", color="#4A90D9", voice_source="openjtalk"),
+            Speaker(name="キャラA", color="#D94A4A", voice_source="openjtalk"),
+            Speaker(name="キャラB(UTAU音源)", color="#4AD97A", voice_source="test_voicebank"),
         ]
         self.lines: list[ScriptLine] = []
 
-    def add_speaker(self, name: str, color: str) -> None:
-        self.speakers.append(Speaker(name=name, color=color))
+    def add_speaker(self, name: str, color: str, voice_source: str = "openjtalk") -> None:
+        self.speakers.append(Speaker(name=name, color=color, voice_source=voice_source))
 
     def speaker_by_name(self, name: str) -> Speaker | None:
         for s in self.speakers:
@@ -404,7 +410,11 @@ class ScriptEditorPanel(QWidget):
         self._playback_queue.clear()
         self._synth_pending_count = len(self.model.lines)
 
-        lines = [(line.line_id, line.text) for line in self.model.lines]
+        lines = []
+        for line in self.model.lines:
+            speaker = self.model.speaker_by_name(line.speaker_name)
+            voice_source = speaker.voice_source if speaker else "openjtalk"
+            lines.append(SynthesisLine(line.line_id, line.text, voice_source))
         self._synth_thread = start_synthesis(
             self._vose_lib_path,
             lines,

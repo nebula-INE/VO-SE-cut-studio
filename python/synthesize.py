@@ -13,6 +13,10 @@ vose_engine.py が要求する NoteEventData(フレーム単位のピッチカ�
 from __future__ import annotations
 
 import math
+import wave
+
+import numpy as np
+import pyopenjtalk
 
 from text_to_notes import PhonemeNote, text_to_notes
 from vose_engine import NoteEventData, VoseEngine
@@ -21,6 +25,28 @@ FRAME_PERIOD_MS = 5.0  # vose_core.cpp の kFramePeriod と揃える
 PLACEHOLDER_SAMPLE_RATE = 44100
 PLACEHOLDER_DURATION_SEC = 0.35  # どの音素の尺よりも長くしておく(最大0.13秒程度のため余裕を持たせる)
 PLACEHOLDER_BASE_HZ = 220.0
+
+
+def synthesize_narration(text: str, output_path: str) -> None:
+    """「素の読み上げ」用の合成経路。VO-SE(vose_core)は一切経由せず、
+    pyopenjtalkの内蔵HTS音声エンジン(tts())をそのまま使う。
+
+    UTAU音源(録音済みボイスバンク)を使わない、Speaker.voice_source ==
+    "openjtalk" の行はこちらで処理する。VO-SEエンジンのロードが一切
+    発生しないため、台本が全てナレーションのみで構成されている場合は
+    vose_core.so自体を読み込む必要がない。
+    """
+    samples_f64, sample_rate = pyopenjtalk.tts(text)
+    # pyopenjtalk.tts()はfloat64で返すため、int16レンジにクリップしてから変換する
+    # (通常は範囲内に収まるが、テキストによっては超えることもあるため念のため)。
+    clipped = np.clip(samples_f64, -32768, 32767)
+    samples_i16 = clipped.astype(np.int16)
+
+    with wave.open(output_path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(samples_i16.tobytes())
 
 
 def generate_placeholder_sample(sample_rate: int = PLACEHOLDER_SAMPLE_RATE,

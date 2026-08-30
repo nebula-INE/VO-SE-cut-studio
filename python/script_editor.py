@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 try:
     from vose_worker import SynthesisLine, start_synthesis
+    from lipsync import extract_mouth_envelope, mouth_openness_at
     _VOSE_AVAILABLE = True
 except ImportError:
     _VOSE_AVAILABLE = False
@@ -298,6 +299,7 @@ class ScriptEditorPanel(QWidget):
     """
 
     telop_changed = Signal(str)  # 現在アクティブなセリフのテキスト(無ければ空文字列)
+    mouth_openness_changed = Signal(float)  # 現在の再生位置での口の開き具合(0.0〜1.0)
 
     PLAYBACK_TICK_MS = 50
 
@@ -312,13 +314,16 @@ class ScriptEditorPanel(QWidget):
         self._vose_lib_path = vose_lib_path
         self._synth_thread = None
         self._synth_wav_paths: dict[str, str] = {}   # line_id -> wavファイルパス
+        self._synth_envelopes: dict[str, list] = {}  # line_id -> LipSyncFrameのリスト
         self._playback_queue: list[str] = []          # 再生待ちのline_idキュー
         self._synth_pending_count = 0
+        self._current_playing_line_id: str | None = None
 
         self.audio_output = QAudioOutput()
         self.media_player = QMediaPlayer()
         self.media_player.setAudioOutput(self.audio_output)
         self.media_player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self.media_player.positionChanged.connect(self._on_media_position_changed)
 
         self.transcript = TranscriptWidget(self.model)
         self.chat_input = ChatInputWidget(self.model)
@@ -425,6 +430,11 @@ class ScriptEditorPanel(QWidget):
 
     def _on_synth_line_ready(self, line_id: str, wav_path: str) -> None:
         self._synth_wav_paths[line_id] = wav_path
+        try:
+            self._synth_envelopes[line_id] = extract_mouth_envelope(wav_path)
+        except Exception as e:  # noqa: BLE001 (エンベロープが無くてもテロップ/音声再生は継続する)
+            print(f"[リップシンク] エンベロープ抽出に失敗 line_id={line_id}: {e}")
+            self._synth_envelopes[line_id] = []
         self._playback_queue.append(line_id)
         self._synth_pending_count -= 1
         self.synth_status_label.setText(
@@ -456,6 +466,8 @@ class ScriptEditorPanel(QWidget):
             self._play_next_in_queue()
             return
 
+        self._current_playing_line_id = line_id
+
         line = next((l for l in self.model.lines if l.line_id == line_id), None)
         if line:
             self.telop_changed.emit(line.text)
@@ -463,12 +475,26 @@ class ScriptEditorPanel(QWidget):
         self.media_player.setSource(QUrl.fromLocalFile(wav_path))
         self.media_player.play()
 
+    def _on_media_position_changed(self, position_ms: int) -> None:
+        """再生位置(ms)から、現在再生中の行のリップシンク用エンベロープを引いて
+        口の開き具合をmouth_openness_changedとして発信する。
+        """
+        if self._current_playing_line_id is None:
+            return
+        frames = self._synth_envelopes.get(self._current_playing_line_id)
+        if not frames:
+            return
+        openness = mouth_openness_at(frames, position_ms / 1000.0)
+        self.mouth_openness_changed.emit(openness)
+
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             if self._playback_queue:
                 self._play_next_in_queue()
             else:
+                self._current_playing_line_id = None
                 self.telop_changed.emit("")  # 再生キューを使い切ったらテロップを消す
+                self.mouth_openness_changed.emit(0.0)  # 口を閉じる
 
     def start_preview_playback(self) -> None:
         if not self.model.lines:

@@ -14,6 +14,7 @@ PreviewPanel は他のウィンドウに埋め込んで使う再利用可能なQ
 from __future__ import annotations
 
 import sys
+import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QRectF
@@ -29,6 +30,12 @@ from PySide6.QtWidgets import (
 )
 
 import aural_engine
+
+try:
+    from character_renderer import render_character_frame
+    _CHARACTER_RENDERER_AVAILABLE = True
+except ImportError:
+    _CHARACTER_RENDERER_AVAILABLE = False
 
 
 class VideoPreviewWidget(QLabel):
@@ -49,6 +56,11 @@ class VideoPreviewWidget(QLabel):
         self._last_frame: np.ndarray | None = None
         self._telop_text: str = ""
 
+        # --- リップシンクキャラクターまわりの状態 ---
+        self._mouth_openness: float = 0.0
+        self._character_enabled: bool = False  # 最初にset_mouth_opennessが呼ばれたら有効化
+        self._character_start_time: float = time.monotonic()  # 微動アニメーションの基準時刻
+
     def show_frame(self, frame: np.ndarray) -> None:
         # frame: (H, W, 3) uint8, RGB順。
         # numpy配列のメモリをQImageが直接参照するため、C-contiguousで
@@ -63,6 +75,16 @@ class VideoPreviewWidget(QLabel):
             return
         self._telop_text = text
         # 動画が一時停止中でもテロップの更新だけは画面に反映させる
+        self._redraw()
+
+    def set_mouth_openness(self, value: float) -> None:
+        """台本エディタ側の音声再生位置から算出された、現在の口の開き具合
+        (0.0〜1.0)を受け取る。初回呼び出し時にキャラクターオーバーレイを
+        有効化する(それまでは動画に何も重ねない)。
+        """
+        self._character_enabled = True
+        self._mouth_openness = max(0.0, min(1.0, value))
+        # 動画が一時停止中でも口の動きだけは画面に反映させる
         self._redraw()
 
     def _redraw(self) -> None:
@@ -81,6 +103,9 @@ class VideoPreviewWidget(QLabel):
         )
         pixmap = QPixmap.fromImage(image)
 
+        if self._character_enabled and _CHARACTER_RENDERER_AVAILABLE:
+            self._draw_character(pixmap)
+
         if self._telop_text:
             self._draw_telop(pixmap)
 
@@ -91,6 +116,36 @@ class VideoPreviewWidget(QLabel):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.setPixmap(scaled)
+
+    def _draw_character(self, pixmap: QPixmap) -> None:
+        """リップシンクキャラクターを、フレーム画像(元解像度)の左下に重ねる。"""
+        time_sec = time.monotonic() - self._character_start_time
+        character_img = render_character_frame(
+            mouth_openness=self._mouth_openness, time_sec=time_sec,
+        )
+
+        # PIL(RGBA, tobytes)からQImageへ変換。PILの行の並びはQImageの
+        # Format_RGBA8888と一致するため、追加の変換無しでそのまま渡せる。
+        char_qimage = QImage(
+            character_img.tobytes("raw", "RGBA"),
+            character_img.width,
+            character_img.height,
+            QImage.Format.Format_RGBA8888,
+        )
+        char_pixmap = QPixmap.fromImage(char_qimage)
+
+        # フレーム高さの40%程度になるようスケールし、左下に配置する
+        target_height = int(pixmap.height() * 0.4)
+        scaled_char = char_pixmap.scaledToHeight(
+            target_height, Qt.TransformationMode.SmoothTransformation
+        )
+
+        painter = QPainter(pixmap)
+        margin = int(pixmap.height() * 0.03)
+        x = margin
+        y = pixmap.height() - scaled_char.height() - margin
+        painter.drawPixmap(x, y, scaled_char)
+        painter.end()
 
     def _draw_telop(self, pixmap: QPixmap) -> None:
         """フレーム画像(元解像度)の下部に半透明バー+テキストを描画する。"""
@@ -206,6 +261,12 @@ class PreviewPanel(QWidget):
         映像上にオーバーレイ表示する。空文字列で非表示になる。
         """
         self.preview.set_telop(text)
+
+    def set_mouth_openness(self, value: float) -> None:
+        """台本エディタ側の音声再生位置から算出された、現在の口の開き具合
+        (0.0〜1.0)を受け取り、映像上のキャラクターに反映する。
+        """
+        self.preview.set_mouth_openness(value)
 
     def cleanup(self) -> None:
         """ウィンドウが閉じられる際に呼び出す。"""

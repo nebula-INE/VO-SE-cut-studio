@@ -1,17 +1,20 @@
 """aural Studio - プレースホルダー2Dキャラクター描画
 
 実際のキャラクターイラスト素材がまだ無いため、リップシンクアルゴリズム
-(lipsync.py)の動作検証用に、簡易的な円ベースのプレースホルダー
-キャラクターを描画する。
+(lipsync.py)・モーションキャプチャ受信(osc_receiver.py)の動作検証用に、
+簡易的な円ベースのプレースホルダーキャラクターを描画する。
 
 実装しているのは:
     - mouth_openness(0〜1)に応じた口の開閉(楕円の縦幅を変化させる)
     - 「微動」: 常時ゆっくり上下に揺れる呼吸のような動き(sin波、低振幅)
+    - head_offset_x/y・head_tilt_deg: OSC(VMCプロトコル)経由で受信した
+      実際の頭の位置・傾きをそのまま反映する(Phase 2: モーションキャプチャ)
 
 本番のキャラクター素材(イラスト/画像レイヤー)が用意でき次第、
-render_character_frame()の中身を「口パーツ画像の差し替え/変形」に
-置き換えれば、lipsync.py側のインターフェース(mouth_openness列)は
-そのまま使い回せる設計にしている。
+render_character_frame()の中身を「口パーツ/首から上の画像レイヤーの
+差し替え・変形」に置き換えれば、呼び出し側のインターフェース
+(mouth_openness, head_offset_x/y, head_tilt_deg)はそのまま使い回せる
+設計にしている。
 """
 
 from __future__ import annotations
@@ -33,6 +36,11 @@ FACE_CENTER = (200, 200)
 IDLE_MOTION_AMPLITUDE_PX = 4.0
 IDLE_MOTION_PERIOD_SEC = 3.0
 
+# VMCプロトコルの位置は実世界のメートル単位で送られてくる(トラッキング
+# デバイスの座標系)ため、キャラクターのピクセル座標へスケール変換する。
+# この値は「頭を10cm動かしたら画面上で何px動くか」の目安。
+HEAD_POSITION_SCALE_PX_PER_METER = 300.0
+
 
 def _idle_offset_y(time_sec: float) -> float:
     """常時のゆっくりした上下の微動オフセット(px)。"""
@@ -40,18 +48,33 @@ def _idle_offset_y(time_sec: float) -> float:
     return math.sin(phase) * IDLE_MOTION_AMPLITUDE_PX
 
 
-def render_character_frame(mouth_openness: float, time_sec: float) -> Image.Image:
+def render_character_frame(
+    mouth_openness: float,
+    time_sec: float,
+    head_offset_x: float = 0.0,
+    head_offset_y: float = 0.0,
+    head_tilt_deg: float = 0.0,
+) -> Image.Image:
     """1フレーム分のキャラクター画像(RGBA)を描画する。
 
     Args:
         mouth_openness: 0.0(閉じる)〜1.0(全開)。
         time_sec: 現在時刻(秒)。微動(呼吸)のアニメーションに使う。
+        head_offset_x: 頭の左右位置オフセット(メートル、VMCプロトコル座標系)。
+        head_offset_y: 頭の上下位置オフセット(メートル、VMCプロトコル座標系。
+            上が正)。
+        head_tilt_deg: 首をかしげる角度(度)。OSC受信データが無い間は0.0。
     """
     img = Image.new("RGBA", CANVAS_SIZE, (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    offset_y = _idle_offset_y(time_sec)
-    cx, cy = FACE_CENTER[0], FACE_CENTER[1] + offset_y
+    idle_y = _idle_offset_y(time_sec)
+    # VMC座標系はY上が正、画像座標系はY下が正なので符号を反転させる。
+    tracked_offset_x = head_offset_x * HEAD_POSITION_SCALE_PX_PER_METER
+    tracked_offset_y = -head_offset_y * HEAD_POSITION_SCALE_PX_PER_METER
+
+    cx = FACE_CENTER[0] + tracked_offset_x
+    cy = FACE_CENTER[1] + idle_y + tracked_offset_y
 
     # 顔(円)
     draw.ellipse(
@@ -82,5 +105,15 @@ def render_character_frame(mouth_openness: float, time_sec: float) -> Image.Imag
         ],
         fill=MOUTH_COLOR,
     )
+
+    if head_tilt_deg != 0.0:
+        # 首をかしげる動きは、キャンバス全体を頭の中心を軸に回転させる
+        # ことで簡易的に表現する(実素材では首から上のレイヤーだけを
+        # 回転させる形になる想定)。
+        img = img.rotate(
+            head_tilt_deg,  # PILは反時計回りが正、VMCのロール符号と合わせて
+            resample=Image.BICUBIC,
+            center=(cx, cy),
+        )
 
     return img

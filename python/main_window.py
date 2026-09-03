@@ -17,7 +17,7 @@ import platform
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QObject, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -27,6 +27,39 @@ from PySide6.QtWidgets import (
 
 from preview import PreviewPanel
 from script_editor import ScriptEditorPanel
+
+try:
+    from osc_receiver import OscMocapReceiver
+    _MOCAP_AVAILABLE = True
+except ImportError:
+    _MOCAP_AVAILABLE = False
+
+
+class _MocapBridge(QObject):
+    """OscMocapReceiverのコールバックは受信スレッド(Python標準の
+    threading.Thread)から呼ばれるため、Qtのシグナル経由でGUIスレッドへ
+    安全に中継するための橋渡し役。
+
+    OscMocapReceiver自身はQObjectではない(pythonosc側の都合)ため、
+    このクラスを介してsignal/slotの仕組みに乗せている。
+    """
+
+    head_transform_received = Signal(float, float, float)  # (offset_x, offset_y, tilt_deg)
+
+    def __init__(self, port: int, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._receiver = OscMocapReceiver(on_head_transform=self._on_head_transform, port=port)
+
+    def _on_head_transform(self, transform) -> None:
+        # 受信スレッドから呼ばれる。Signal.emit()はスレッドセーフなので
+        # そのままキュー経由でGUIスレッドへ届く。
+        self.head_transform_received.emit(transform.offset_x, transform.offset_y, transform.tilt_deg)
+
+    def start(self) -> None:
+        self._receiver.start()
+
+    def stop(self) -> None:
+        self._receiver.stop()
 
 
 def _default_vose_lib_path() -> str | None:
@@ -63,6 +96,16 @@ class MainWindow(QMainWindow):
         # 台本エディタの「台本プレビュー再生」で進む現在のセリフを
         # 映像プレビューへテロップとしてオーバーレイ表示する。
         self.script_panel.telop_changed.connect(self.preview_panel.set_telop)
+        self.script_panel.mouth_openness_changed.connect(self.preview_panel.set_mouth_openness)
+
+        # モーションキャプチャ(VMCプロトコル/OSC)受信。スマホ等のトラッキング
+        # アプリから頭の位置・傾きをリアルタイムに受け取り、映像プレビューの
+        # キャラクターへ反映する(plan.md Phase 2)。
+        self.mocap_bridge: _MocapBridge | None = None
+        if _MOCAP_AVAILABLE:
+            self.mocap_bridge = _MocapBridge(port=39539)
+            self.mocap_bridge.head_transform_received.connect(self.preview_panel.set_head_transform)
+            self.mocap_bridge.start()
 
         self._build_menu()
 
@@ -96,6 +139,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
         self.preview_panel.cleanup()
         self.script_panel.cleanup()
+        if self.mocap_bridge is not None:
+            self.mocap_bridge.stop()
         super().closeEvent(event)
 
 

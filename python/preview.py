@@ -61,6 +61,11 @@ class VideoPreviewWidget(QLabel):
         self._character_enabled: bool = False  # 最初にset_mouth_opennessが呼ばれたら有効化
         self._character_start_time: float = time.monotonic()  # 微動アニメーションの基準時刻
 
+        # --- モーションキャプチャ(頭部トラッキング)の状態 ---
+        self._head_offset_x: float = 0.0
+        self._head_offset_y: float = 0.0
+        self._head_tilt_deg: float = 0.0
+
     def show_frame(self, frame: np.ndarray) -> None:
         # frame: (H, W, 3) uint8, RGB順。
         # numpy配列のメモリをQImageが直接参照するため、C-contiguousで
@@ -85,6 +90,17 @@ class VideoPreviewWidget(QLabel):
         self._character_enabled = True
         self._mouth_openness = max(0.0, min(1.0, value))
         # 動画が一時停止中でも口の動きだけは画面に反映させる
+        self._redraw()
+
+    def set_head_transform(self, offset_x: float, offset_y: float, tilt_deg: float) -> None:
+        """OSC(VMCプロトコル)経由で受信した頭の位置・傾きを反映する。
+        set_mouth_opennessと同様、初回呼び出し時にキャラクターオーバーレイを
+        有効化する(モーションキャプチャだけを先に繋いだ場合にも動作する)。
+        """
+        self._character_enabled = True
+        self._head_offset_x = offset_x
+        self._head_offset_y = offset_y
+        self._head_tilt_deg = tilt_deg
         self._redraw()
 
     def _redraw(self) -> None:
@@ -121,7 +137,11 @@ class VideoPreviewWidget(QLabel):
         """リップシンクキャラクターを、フレーム画像(元解像度)の左下に重ねる。"""
         time_sec = time.monotonic() - self._character_start_time
         character_img = render_character_frame(
-            mouth_openness=self._mouth_openness, time_sec=time_sec,
+            mouth_openness=self._mouth_openness,
+            time_sec=time_sec,
+            head_offset_x=self._head_offset_x,
+            head_offset_y=self._head_offset_y,
+            head_tilt_deg=self._head_tilt_deg,
         )
 
         # PIL(RGBA, tobytes)からQImageへ変換。PILの行の並びはQImageの
@@ -267,6 +287,12 @@ class PreviewPanel(QWidget):
         (0.0〜1.0)を受け取り、映像上のキャラクターに反映する。
         """
         self.preview.set_mouth_openness(value)
+
+    def set_head_transform(self, offset_x: float, offset_y: float, tilt_deg: float) -> None:
+        """OSC(VMCプロトコル)経由で受信した頭の位置・傾きを、
+        映像上のキャラクターに反映する。
+        """
+        self.preview.set_head_transform(offset_x, offset_y, tilt_deg)
 
     def cleanup(self) -> None:
         """ウィンドウが閉じられる際に呼び出す。"""

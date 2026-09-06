@@ -30,36 +30,83 @@ from script_editor import ScriptEditorPanel
 
 try:
     from osc_receiver import OscMocapReceiver
-    _MOCAP_AVAILABLE = True
+    _OSC_AVAILABLE = True
 except ImportError:
-    _MOCAP_AVAILABLE = False
+    _OSC_AVAILABLE = False
+
+try:
+    from websocket_receiver import WebSocketMocapReceiver
+    _WEBSOCKET_AVAILABLE = True
+except ImportError:
+    _WEBSOCKET_AVAILABLE = False
+
+try:
+    from preview_3d import Head3DPreviewWidget
+    _PREVIEW_3D_AVAILABLE = True
+except ImportError:
+    _PREVIEW_3D_AVAILABLE = False
+
+_MOCAP_AVAILABLE = _OSC_AVAILABLE or _WEBSOCKET_AVAILABLE
 
 
 class _MocapBridge(QObject):
-    """OscMocapReceiverのコールバックは受信スレッド(Python標準の
-    threading.Thread)から呼ばれるため、Qtのシグナル経由でGUIスレッドへ
-    安全に中継するための橋渡し役。
+    """OSC(VMCプロトコル)・WebSocket(JSON)、どちらの受信経路から来た
+    データも、同じQtシグナルに集約して中継する橋渡し役。
 
-    OscMocapReceiver自身はQObjectではない(pythonosc側の都合)ため、
-    このクラスを介してsignal/slotの仕組みに乗せている。
+    両受信機のコールバックはそれぞれ別スレッド(threading.Thread /
+    asyncioイベントループ用スレッド)から呼ばれるため、Qtのシグナル経由で
+    GUIスレッドへ安全に中継する。GUI側は、キャラクターがOSC由来か
+    WebSocket由来かを区別する必要が無い(同じ形のデータとして届く)。
     """
 
-    head_transform_received = Signal(float, float, float)  # (offset_x, offset_y, tilt_deg)
+    head_transform_received = Signal(float, float, float)  # (offset_x, offset_y, tilt_deg) -- 2D用
+    head_quaternion_received = Signal(float, float, float, float, float, float, float)
+    # (offset_x, offset_y, offset_z, qx, qy, qz, qw) -- 3D用。2D側と同じ受信データから
+    # 生成されるが、ロール角だけに単純化していない生のクォータニオンをそのまま運ぶ。
+    blend_shapes_received = Signal(dict)  # {ブレンドシェイプ名: 0〜1}
 
-    def __init__(self, port: int, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        osc_port: int,
+        websocket_port: int,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
-        self._receiver = OscMocapReceiver(on_head_transform=self._on_head_transform, port=port)
+        self._osc_receiver = OscMocapReceiver(
+            on_head_transform=self._on_head_transform,
+            on_blend_shapes=self._on_blend_shapes,
+            port=osc_port,
+        ) if _OSC_AVAILABLE else None
+
+        self._websocket_receiver = WebSocketMocapReceiver(
+            on_head_transform=self._on_head_transform,
+            on_blend_shapes=self._on_blend_shapes,
+            port=websocket_port,
+        ) if _WEBSOCKET_AVAILABLE else None
 
     def _on_head_transform(self, transform) -> None:
         # 受信スレッドから呼ばれる。Signal.emit()はスレッドセーフなので
         # そのままキュー経由でGUIスレッドへ届く。
         self.head_transform_received.emit(transform.offset_x, transform.offset_y, transform.tilt_deg)
+        self.head_quaternion_received.emit(
+            transform.offset_x, transform.offset_y, transform.offset_z,
+            transform.qx, transform.qy, transform.qz, transform.qw,
+        )
+
+    def _on_blend_shapes(self, blend_shapes: dict) -> None:
+        self.blend_shapes_received.emit(blend_shapes)
 
     def start(self) -> None:
-        self._receiver.start()
+        if self._osc_receiver is not None:
+            self._osc_receiver.start()
+        if self._websocket_receiver is not None:
+            self._websocket_receiver.start()
 
     def stop(self) -> None:
-        self._receiver.stop()
+        if self._osc_receiver is not None:
+            self._osc_receiver.stop()
+        if self._websocket_receiver is not None:
+            self._websocket_receiver.stop()
 
 
 def _default_vose_lib_path() -> str | None:
@@ -98,14 +145,34 @@ class MainWindow(QMainWindow):
         self.script_panel.telop_changed.connect(self.preview_panel.set_telop)
         self.script_panel.mouth_openness_changed.connect(self.preview_panel.set_mouth_openness)
 
-        # モーションキャプチャ(VMCプロトコル/OSC)受信。スマホ等のトラッキング
-        # アプリから頭の位置・傾きをリアルタイムに受け取り、映像プレビューの
-        # キャラクターへ反映する(plan.md Phase 2)。
+        # モーションキャプチャ(VMCプロトコル/OSC・WebSocket)受信。スマホ等の
+        # トラッキングアプリから頭の位置・傾きをリアルタイムに受け取り、
+        # 映像プレビューのキャラクターへ反映する(plan.md Phase 2)。
         self.mocap_bridge: _MocapBridge | None = None
         if _MOCAP_AVAILABLE:
-            self.mocap_bridge = _MocapBridge(port=39539)
+            self.mocap_bridge = _MocapBridge(osc_port=39539, websocket_port=39540)
             self.mocap_bridge.head_transform_received.connect(self.preview_panel.set_head_transform)
+            self.mocap_bridge.blend_shapes_received.connect(self.preview_panel.set_blend_shapes)
             self.mocap_bridge.start()
+
+        # 3Dプレビュー(モード切り替え): 2Dキャラクター(上記)と全く同じ
+        # モーションキャプチャデータで、簡易3Dヘッドプロキシを駆動する。
+        # 「共通モーションキャプチャエンジンを2D/3D両方に流し込める」ことの
+        # 実証用ドック。デフォルトでは非表示(2Dモード相当)。
+        self.preview_3d_dock: QDockWidget | None = None
+        if _PREVIEW_3D_AVAILABLE:
+            self.preview_3d_widget = Head3DPreviewWidget()
+            self.preview_3d_dock = QDockWidget("3Dプレビュー(モーションキャプチャ)", self)
+            self.preview_3d_dock.setWidget(self.preview_3d_widget)
+            self.preview_3d_dock.setFeatures(
+                QDockWidget.DockWidgetFeature.DockWidgetMovable
+                | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            )
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.preview_3d_dock)
+            self.preview_3d_dock.hide()  # デフォルトは2Dモード相当(3Dは非表示)
+
+            if self.mocap_bridge is not None:
+                self.mocap_bridge.head_quaternion_received.connect(self.preview_3d_widget.set_head_quaternion)
 
         self._build_menu()
 
@@ -128,6 +195,15 @@ class MainWindow(QMainWindow):
         toggle_script_action = self.script_dock.toggleViewAction()
         toggle_script_action.setText("台本エディタを表示")
         view_menu.addAction(toggle_script_action)
+
+        if self.preview_3d_dock is not None:
+            # モード切り替えUI(基礎): 2Dキャラクター(常時表示)に加えて、
+            # 同じモーションキャプチャデータで駆動する3Dプレビューの表示/
+            # 非表示を切り替えられる。plan.mdの「2Dプロジェクトと3D
+            # プロジェクトで動的に最適化される操作画面」の最初の一歩。
+            toggle_3d_action = self.preview_3d_dock.toggleViewAction()
+            toggle_3d_action.setText("3Dプレビューを表示(モーションキャプチャ)")
+            view_menu.addAction(toggle_3d_action)
 
     def open_video_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

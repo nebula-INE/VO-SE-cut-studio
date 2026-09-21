@@ -27,6 +27,29 @@ PLACEHOLDER_DURATION_SEC = 0.35  # どの音素の尺よりも長くしておく
 PLACEHOLDER_BASE_HZ = 220.0
 
 
+def _katakana_to_hiragana(text: str) -> str:
+    """カタカナをひらがなに変換する。
+
+    text_to_notes.PhonemeNote.mora_text は pyopenjtalk の読み(カタカナ、
+    例: "ア","カ")をそのまま保持しているが、実際のUTAU音源のoto.iniは
+    慣習的にひらがな("あ","か")でエイリアスを付ける。この変換をしないと、
+    実在するボイスバンクのエイリアスと一致せず無音になる
+    (実際にこの不一致で無音になる不具合を踏んだ)。
+
+    カタカナ(U+30A1-U+30F6)とひらがな(U+3041-U+3096)はUnicode上で
+    固定オフセット(0x60)の関係にあるため、単純な引き算で変換できる。
+    長音符「ー」(U+30FC)はひらがなに対応する文字が無いためそのまま残す。
+    """
+    result = []
+    for ch in text:
+        code = ord(ch)
+        if 0x30A1 <= code <= 0x30F6:
+            result.append(chr(code - 0x60))
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
 def synthesize_narration(text: str, output_path: str) -> None:
     """「素の読み上げ」用の合成経路。VO-SE(vose_core)は一切経由せず、
     pyopenjtalkの内蔵HTS音声エンジン(tts())をそのまま使う。
@@ -122,6 +145,74 @@ def synthesize_text(
     register_placeholder_voicebank(engine, phonemes_used)
 
     note_events = phoneme_notes_to_note_events(notes)
+    engine.execute_render(note_events, output_path, mode_flag=mode_flag)
+    return notes
+
+
+def phoneme_notes_to_mora_note_events(
+    notes: list[PhonemeNote],
+    frame_period_ms: float = FRAME_PERIOD_MS,
+) -> list[NoteEventData]:
+    """PhonemeNote列(音素単位)を、モーラ単位のNoteEventData列に集約する。
+
+    本物のUTAU形式ボイスバンク(oto.ini)のエイリアスは、通常「あ」「か」
+    のようなモーラ単位(またはそれに準じる単位)で定義されており、
+    text_to_notes.pyが出す音素単位(k, a, ...)のエイリアスとは噛み合わない。
+    そのため、同じモーラに属する連続した音素(PhonemeNote.mora_text が
+    同じもの)をまとめ、モーラのテキストをそのままエイリアスとして使う
+    NoteEventDataに変換する。
+
+    1モーラ内の音素は全て同じピッチを持つ(text_to_notesのアクセント規則が
+    モーラ単位でH/Lを決めているため)ので、代表値として先頭音素のpitch_hzを
+    使えばよい。durationはモーラ内の音素の合計を使う。
+    """
+    events: list[NoteEventData] = []
+    current_mora: str | None = None
+    current_duration_sec = 0.0
+    current_pitch_hz = 0.0
+
+    def _flush() -> None:
+        if current_mora is None:
+            return
+        frame_count = max(1, round((current_duration_sec * 1000.0) / frame_period_ms))
+        events.append(NoteEventData(
+            wav_path=_katakana_to_hiragana(current_mora),
+            pitch_curve_hz=[current_pitch_hz] * frame_count,
+        ))
+
+    for note in notes:
+        if note.mora_text != current_mora:
+            _flush()
+            current_mora = note.mora_text
+            current_duration_sec = 0.0
+            current_pitch_hz = note.pitch_hz
+        current_duration_sec += note.duration_sec
+
+    _flush()
+    return events
+
+
+def synthesize_with_voicebank(
+    engine: VoseEngine,
+    text: str,
+    output_path: str,
+    base_pitch_hz: float = 220.0,
+    mode_flag: int = 0,
+) -> list[PhonemeNote]:
+    """日本語テキストを、本物のボイスバンク(VoicebankManagerで事前に
+    load_into_engine済み)を使ってVO-SEで音声化する。
+
+    呼び出し側が事前にVoicebankManager.load_into_engine(engine, voicebank_id)
+    を済ませておくこと(このモジュール自体はボイスバンクの選択・ロードには
+    関与しない)。ボイスバンクに存在しないモーラのエイリアスを参照すると、
+    VO-SE側で該当音源が見つからず無音になる可能性がある(ボイスバンクの
+    収録モーラが不足している場合の既知の制約)。
+    """
+    notes = text_to_notes(text, base_pitch_hz=base_pitch_hz)
+    if not notes:
+        raise ValueError(f"テキストから音素を生成できませんでした: {text!r}")
+
+    note_events = phoneme_notes_to_mora_note_events(notes)
     engine.execute_render(note_events, output_path, mode_flag=mode_flag)
     return notes
 

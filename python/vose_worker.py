@@ -1,12 +1,16 @@
 """aural Studio - 音声合成のバックグラウンドワーカー
 
-台本の各行を、話者に設定されたvoice_sourceに応じて2つの経路に振り分けて
-合成する:
+台本の各行を、話者に設定されたvoice_sourceに応じて経路を振り分けて合成する:
 
   - voice_source == "openjtalk": 素の読み上げ。pyopenjtalk.tts()を直接
     呼ぶ(synthesize.synthesize_narration)。VO-SE(vose_core)は経由しない。
-  - それ以外: UTAU形式ボイスバンクの識別子とみなし、VO-SE経由で合成する
-    (synthesize.synthesize_text)。
+  - それ以外: ボイスバンクID とみなす。
+      - VoicebankManagerに実在するボイスバンク(UTAU音源等)として
+        見つかった場合: そのボイスバンクをロードし、本物の音源で
+        synthesize_with_voicebank() を使って合成する。
+      - 見つからない場合: プレースホルダー音源(疎通確認用の合成音)で
+        synthesize_text() にフォールバックする(ボイスバンク未整備の
+        話者でも、パイプライン自体は試せるようにするため)。
 
 台本が全てナレーションのみで構成されている場合は、VoseEngine(vose_core.so
 のctypesラッパー)のロード自体が一度も発生しない(遅延ロード)。
@@ -38,10 +42,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from synthesize import synthesize_narration, synthesize_text
+from synthesize import synthesize_narration, synthesize_text, synthesize_with_voicebank
+from voicebank_manager import VoicebankManager
 from vose_engine import VoseEngine
 
 NARRATION_VOICE_SOURCE = "openjtalk"
+
+# ボイスバンクを探すデフォルトのフォルダ(このファイルから見て ../voicebanks)。
+# 各サブフォルダが1つのボイスバンクに対応する(voicebank_manager.pyを参照)。
+DEFAULT_VOICEBANK_ROOT = str(Path(__file__).resolve().parent.parent / "voicebanks")
 
 
 @dataclass
@@ -60,10 +69,17 @@ class VoseSynthesisThread(QThread):
     line_failed = Signal(str, str)  # (line_id, error_message)
     all_finished = Signal()
 
-    def __init__(self, lib_path: str, lines: list[SynthesisLine], parent=None) -> None:
+    def __init__(
+        self,
+        lib_path: str,
+        lines: list[SynthesisLine],
+        voicebank_root: str = DEFAULT_VOICEBANK_ROOT,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._lib_path = lib_path
         self._lines = lines
+        self._voicebank_root = voicebank_root
         self._tmp_dir = Path(tempfile.mkdtemp(prefix="aural_vose_"))
         self._cancelled = False
 
@@ -75,15 +91,18 @@ class VoseSynthesisThread(QThread):
         受信側スレッド(通常はメインスレッド)へキュー経由で届けてくれるため、
         直接GUIを操作しない限り安全。
         """
-        # VO-SEエンジンはUTAU音源を使う行が1つでもある場合のみ遅延ロードする。
-        # 台本が全てナレーション(openjtalk)のみなら、vose_core.soへの依存は
-        # 一切発生しない。
+        # VO-SEエンジンはUTAU音源(または将来の公式音源)を使う行が1つでも
+        # ある場合のみ遅延ロードする。台本が全てナレーション(openjtalk)
+        # のみなら、vose_core.soへの依存は一切発生しない。
         vose_engine: VoseEngine | None = None
+        voicebank_manager: VoicebankManager | None = None
         needs_vose = any(line.voice_source != NARRATION_VOICE_SOURCE for line in self._lines)
 
         if needs_vose:
             try:
                 vose_engine = VoseEngine(self._lib_path)
+                voicebank_manager = VoicebankManager()
+                voicebank_manager.discover_voicebanks(self._voicebank_root)
             except Exception as e:  # noqa: BLE001 (GUIへエラー表示するのが目的)
                 for line in self._lines:
                     if line.voice_source != NARRATION_VOICE_SOURCE:
@@ -101,7 +120,18 @@ class VoseSynthesisThread(QThread):
                     if vose_engine is None:
                         # 上のVO-SEロード失敗が既にline_failedで通知済みなのでスキップ
                         continue
-                    synthesize_text(vose_engine, line.text, str(wav_path))
+
+                    voicebank = voicebank_manager.get(line.voice_source) if voicebank_manager else None
+                    if voicebank is not None:
+                        # 実在するボイスバンク(UTAU音源等)が見つかった場合は、
+                        # それをロードして本物の音源で合成する。
+                        voicebank_manager.load_into_engine(vose_engine, line.voice_source)
+                        synthesize_with_voicebank(vose_engine, line.text, str(wav_path))
+                    else:
+                        # ボイスバンクが未整備の場合は、疎通確認用の
+                        # プレースホルダー音源にフォールバックする。
+                        synthesize_text(vose_engine, line.text, str(wav_path))
+
                 self.line_ready.emit(line.line_id, str(wav_path))
             except Exception as e:  # noqa: BLE001 (1行失敗しても他行は続行する)
                 self.line_failed.emit(line.line_id, str(e))
@@ -115,13 +145,14 @@ def start_synthesis(
     on_line_ready,
     on_line_failed,
     on_all_finished,
+    voicebank_root: str = DEFAULT_VOICEBANK_ROOT,
 ) -> VoseSynthesisThread:
     """合成スレッドを起動するヘルパー。
 
     呼び出し側は戻り値のスレッドオブジェクトを、スレッドが終了するまで
     (all_finishedが呼ばれ、かつwait()を済ませるまで)参照を保持し続けること。
     """
-    thread = VoseSynthesisThread(lib_path, lines)
+    thread = VoseSynthesisThread(lib_path, lines, voicebank_root=voicebank_root)
     thread.line_ready.connect(on_line_ready)
     thread.line_failed.connect(on_line_failed)
     thread.all_finished.connect(on_all_finished)

@@ -26,8 +26,11 @@ OtoEntryは純粋にタイミングのメタデータであり、実際の音声
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import struct
 import wave
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -294,6 +297,104 @@ class VoicebankManager:
             found.append(voicebank)
 
         return found
+
+    def import_voicebank(
+        self,
+        source_path: str,
+        root_dir: str,
+        display_name: str | None = None,
+    ) -> VoiceBank:
+        """外部のボイスバンク(フォルダ、またはZIPファイル)を、
+        root_dir配下にコピー(ZIPの場合は展開)して取り込む。
+
+        GUIの「ボイスバンクを追加」機能から呼ばれる想定。取り込み後は
+        自動でregister()され、他のボイスバンクと同様に扱えるようになる。
+
+        Args:
+            source_path: 取り込み元。フォルダ(oto.ini+wav群を含む)、
+                または.zipファイル(展開するとoto.ini+wav群が出てくるもの)。
+            root_dir: ボイスバンクの格納先ルート(通常はDEFAULT_VOICEBANK_ROOT)。
+            display_name: 表示名。省略時はフォルダ名/zipファイル名を使う。
+
+        Returns:
+            取り込んだVoiceBank。
+
+        Raises:
+            FileNotFoundError: source_pathが存在しない。
+            ValueError: 取り込んだ内容にoto.iniが見つからない
+                (UTAU音源として不完全、または対応外の構成)。
+        """
+        source = Path(source_path)
+        if not source.exists():
+            raise FileNotFoundError(f"インポート元が見つかりません: {source_path}")
+
+        root = Path(root_dir)
+        root.mkdir(parents=True, exist_ok=True)
+
+        base_name = display_name or source.stem
+        voicebank_id = self._unique_voicebank_id(root, base_name)
+        dest_dir = root / voicebank_id
+
+        if source.is_dir():
+            shutil.copytree(source, dest_dir)
+        elif source.suffix.lower() == ".zip":
+            dest_dir.mkdir(parents=True)
+            with zipfile.ZipFile(source, "r") as zf:
+                # ZIPスラッシュ("../"等)によるディレクトリトラバーサルを
+                # 防ぐため、各エントリの展開先がdest_dir配下に収まることを
+                # 確認してから展開する。
+                for member in zf.namelist():
+                    member_path = (dest_dir / member).resolve()
+                    if not str(member_path).startswith(str(dest_dir.resolve())):
+                        raise ValueError(f"不正なパスを含むZIPファイルです: {member!r}")
+                zf.extractall(dest_dir)
+        else:
+            raise ValueError(f"フォルダまたは.zipファイルを指定してください: {source_path}")
+
+        # oto.iniが直下ではなく1階層下の単一フォルダに入っているZIP構成
+        # (多くの配布ZIPがこの形になっている)にも対応する。
+        oto_ini_dir = self._find_oto_ini_dir(dest_dir)
+        if oto_ini_dir is None:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            raise ValueError(
+                f"oto.iniが見つからないため、UTAU音源として取り込めませんでした: {source_path}"
+            )
+        if oto_ini_dir != dest_dir:
+            # 1階層下に実体がある場合は、中身をdest_dir直下へ引き上げる。
+            for item in oto_ini_dir.iterdir():
+                shutil.move(str(item), str(dest_dir / item.name))
+            shutil.rmtree(oto_ini_dir, ignore_errors=True)
+
+        voicebank = VoiceBank(
+            id=voicebank_id,
+            name=display_name or base_name,
+            type=VOICEBANK_TYPE_UTAU,
+            path=str(dest_dir),
+        )
+        self.register(voicebank)
+        return voicebank
+
+    @staticmethod
+    def _find_oto_ini_dir(root: Path) -> Path | None:
+        """rootまたはその1階層下のサブフォルダで、oto.iniを含むディレクトリを探す。"""
+        if (root / "oto.ini").exists():
+            return root
+        if root.is_dir():
+            sub_dirs = [d for d in root.iterdir() if d.is_dir()]
+            if len(sub_dirs) == 1 and (sub_dirs[0] / "oto.ini").exists():
+                return sub_dirs[0]
+        return None
+
+    @staticmethod
+    def _unique_voicebank_id(root: Path, base_name: str) -> str:
+        """他のボイスバンクIDと衝突しない、ファイル名として安全なIDを作る。"""
+        safe_base = re.sub(r"[^\w\-]+", "_", base_name).strip("_") or "voicebank"
+        candidate = safe_base
+        suffix = 1
+        while (root / candidate).exists():
+            suffix += 1
+            candidate = f"{safe_base}_{suffix}"
+        return candidate
 
     def load_into_engine(self, engine: VoseEngine, voicebank_id: str) -> None:
         """指定したボイスバンクをVoseEngineへロードする(set_oto_data等)。

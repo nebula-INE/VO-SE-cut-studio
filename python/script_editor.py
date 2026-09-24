@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -45,8 +46,9 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from vose_worker import SynthesisLine, start_synthesis
+    from vose_worker import SynthesisLine, start_synthesis, DEFAULT_VOICEBANK_ROOT
     from lipsync import extract_mouth_envelope, mouth_openness_at
+    from voicebank_manager import VoicebankManager
     _VOSE_AVAILABLE = True
 except ImportError:
     _VOSE_AVAILABLE = False
@@ -92,7 +94,7 @@ class ScriptModel:
         self.speakers: list[Speaker] = [
             Speaker(name="ナレーター", color="#4A90D9", voice_source="openjtalk"),
             Speaker(name="キャラA", color="#D94A4A", voice_source="openjtalk"),
-            Speaker(name="キャラB(UTAU音源)", color="#4AD97A", voice_source="test_voicebank"),
+            Speaker(name="キャラB(UTAU音源)", color="#4AD97A", voice_source="sample_utau"),
         ]
         self.lines: list[ScriptLine] = []
 
@@ -319,6 +321,16 @@ class ScriptEditorPanel(QWidget):
         self._synth_pending_count = 0
         self._current_playing_line_id: str | None = None
 
+        # --- ボイスバンク管理 ---
+        # GUIからのインポート・話者への割り当てに使う。vose_worker.py側の
+        # VoseSynthesisThreadも別途自前のVoicebankManagerを持つが(スレッド
+        # 分離のため)、discover_voicebanks()の対象フォルダ(DEFAULT_
+        # VOICEBANK_ROOT)は共通なので、こちらでインポートしたボイスバンクは
+        # 次回の合成実行時にvose_worker側でも自動的に見つかる。
+        self._voicebank_manager = VoicebankManager() if _VOSE_AVAILABLE else None
+        if self._voicebank_manager is not None:
+            self._voicebank_manager.discover_voicebanks(DEFAULT_VOICEBANK_ROOT)
+
         self.audio_output = QAudioOutput()
         self.media_player = QMediaPlayer()
         self.media_player.setAudioOutput(self.audio_output)
@@ -362,6 +374,12 @@ class ScriptEditorPanel(QWidget):
 
         self.synth_status_label = QLabel("")
 
+        self.import_voicebank_button = QPushButton("🎤 ボイスバンクを追加...")
+        self.import_voicebank_button.clicked.connect(self.import_voicebank)
+        self.import_voicebank_button.setEnabled(_VOSE_AVAILABLE)
+        if not _VOSE_AVAILABLE:
+            self.import_voicebank_button.setToolTip("voicebank_manager(VO-SEエンジン連携)が利用できません")
+
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(self.PLAYBACK_TICK_MS)
         self.playback_timer.timeout.connect(self._advance_playback)
@@ -375,6 +393,7 @@ class ScriptEditorPanel(QWidget):
         toolbar.addWidget(load_button)
         toolbar.addWidget(self.preview_button)
         toolbar.addWidget(self.synth_button)
+        toolbar.addWidget(self.import_voicebank_button)
         toolbar.addWidget(self.synth_status_label)
         toolbar.addStretch(1)
         toolbar.addWidget(self.duration_label)
@@ -398,6 +417,70 @@ class ScriptEditorPanel(QWidget):
             self.start_preview_playback()
 
     # --- VO-SE音声合成 + 順次再生 ---
+
+    def import_voicebank(self) -> None:
+        """フォルダまたはZIPファイルからボイスバンクを取り込み、
+        それを使う新しい話者を追加する。
+        """
+        if self._voicebank_manager is None:
+            QMessageBox.warning(self, "ボイスバンク追加", "voicebank_managerが利用できません。")
+            return
+
+        choice_dialog = QMessageBox(self)
+        choice_dialog.setWindowTitle("ボイスバンクを追加")
+        choice_dialog.setText("ボイスバンクの取り込み元を選んでください。")
+        folder_button = choice_dialog.addButton("フォルダから...", QMessageBox.ButtonRole.ActionRole)
+        zip_button = choice_dialog.addButton("ZIPファイルから...", QMessageBox.ButtonRole.ActionRole)
+        choice_dialog.addButton("キャンセル", QMessageBox.ButtonRole.RejectRole)
+        choice_dialog.exec()
+
+        clicked = choice_dialog.clickedButton()
+        if clicked is folder_button:
+            source_path = QFileDialog.getExistingDirectory(self, "ボイスバンクのフォルダを選択")
+        elif clicked is zip_button:
+            source_path, _ = QFileDialog.getOpenFileName(self, "ボイスバンクのZIPファイルを選択", "", "ZIPファイル (*.zip)")
+        else:
+            return  # キャンセル
+
+        if not source_path:
+            return
+
+        display_name, ok = QInputDialog.getText(self, "ボイスバンクを追加", "このボイスバンクの表示名:")
+        if not ok or not display_name.strip():
+            return
+
+        try:
+            voicebank = self._voicebank_manager.import_voicebank(
+                source_path, DEFAULT_VOICEBANK_ROOT, display_name=display_name.strip(),
+            )
+        except (FileNotFoundError, ValueError) as e:
+            QMessageBox.critical(self, "ボイスバンクの取り込みに失敗", str(e))
+            return
+
+        speaker_name, ok = QInputDialog.getText(
+            self, "話者を追加", f"「{voicebank.name}」を使う話者の名前:",
+            text=voicebank.name,
+        )
+        if not ok or not speaker_name.strip():
+            QMessageBox.information(
+                self, "ボイスバンクを追加",
+                f"ボイスバンク「{voicebank.name}」を取り込みました。\n"
+                "話者は追加していません(必要な話者に voice_source として"
+                f" '{voicebank.id}' を設定してください)。",
+            )
+            return
+
+        # 話者一覧で見分けやすいよう、既存の色と重複しない適当な色を割り当てる
+        palette = ["#4A90D9", "#D94A4A", "#4AD97A", "#D9A64A", "#9A4AD9", "#4AD9D0"]
+        used_colors = {s.color for s in self.model.speakers}
+        color = next((c for c in palette if c not in used_colors), palette[0])
+
+        self.model.add_speaker(speaker_name.strip(), color, voice_source=voicebank.id)
+        self.chat_input._refresh_speakers()
+        QMessageBox.information(
+            self, "ボイスバンクを追加",
+            f"話者「{speaker_name.strip()}」を追加しました(ボイスバンク: {voicebank.name})。",
+        )
 
     def start_voice_synthesis(self) -> None:
         if not _VOSE_AVAILABLE:

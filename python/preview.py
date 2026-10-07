@@ -66,6 +66,13 @@ class VideoPreviewWidget(QLabel):
         self._head_offset_y: float = 0.0
         self._head_tilt_deg: float = 0.0
 
+        # --- 表情・母音・全身ボーンの状態 ---
+        self._blend_shapes: dict[str, float] = {}
+        self._vowels: dict[str, float] = {}
+        self._bones: dict[str, tuple[float, float, float, float]] = {}
+        self._character_visible: bool = True  # 3Dモードでは2Dキャラを隠す
+        self._blank_frame: np.ndarray | None = None  # 動画未読込時の下地
+
     def show_frame(self, frame: np.ndarray) -> None:
         # frame: (H, W, 3) uint8, RGB順。
         # numpy配列のメモリをQImageが直接参照するため、C-contiguousで
@@ -103,15 +110,51 @@ class VideoPreviewWidget(QLabel):
         self._head_tilt_deg = tilt_deg
         self._redraw()
 
+    def set_blend_shapes(self, blend_shapes: dict) -> None:
+        """VMC由来のブレンドシェイプ(表情・まばたき・母音)を反映する。"""
+        self._character_enabled = True
+        self._blend_shapes = dict(blend_shapes)
+        self._redraw()
+
+    def set_vowels(self, vowels: dict) -> None:
+        """音声解析(lipsync.py)由来の母音の重みを反映する。空dictで解除。"""
+        self._vowels = dict(vowels)
+        if self._character_enabled:
+            self._redraw()
+
+    def set_bone_transform(self, name: str, qx: float, qy: float, qz: float, qw: float) -> None:
+        """Head以外のボーン(腕など)の回転を反映する。"""
+        self._character_enabled = True
+        self._bones[name] = (qx, qy, qz, qw)
+        self._redraw()
+
+    def set_character_visible(self, visible: bool) -> None:
+        """2Dキャラクターの表示/非表示(モード切り替え用)。"""
+        self._character_visible = visible
+        self._redraw()
+
+    def _base_frame(self) -> np.ndarray | None:
+        """描画の下地。動画があればそのフレーム、無ければキャラ表示中のみ暗い
+        単色のキャンバス(モーキャプだけ先に繋いだときにキャラが見えるように)。
+        """
+        if self._last_frame is not None:
+            return self._last_frame
+        if self._character_enabled and self._character_visible and _CHARACTER_RENDERER_AVAILABLE:
+            if self._blank_frame is None:
+                self._blank_frame = np.full((720, 1280, 3), 32, dtype=np.uint8)
+            return self._blank_frame
+        return None
+
     def _redraw(self) -> None:
-        if self._last_frame is None:
+        base_frame = self._base_frame()
+        if base_frame is None:
             return
 
-        height, width, _ = self._last_frame.shape
+        height, width, _ = base_frame.shape
         bytes_per_line = width * 3
 
         image = QImage(
-            self._last_frame.tobytes(),  # QImageに独立したコピーを持たせる
+            base_frame.tobytes(),  # QImageに独立したコピーを持たせる
             width,
             height,
             bytes_per_line,
@@ -119,7 +162,7 @@ class VideoPreviewWidget(QLabel):
         )
         pixmap = QPixmap.fromImage(image)
 
-        if self._character_enabled and _CHARACTER_RENDERER_AVAILABLE:
+        if self._character_enabled and self._character_visible and _CHARACTER_RENDERER_AVAILABLE:
             self._draw_character(pixmap)
 
         if self._telop_text:
@@ -142,6 +185,9 @@ class VideoPreviewWidget(QLabel):
             head_offset_x=self._head_offset_x,
             head_offset_y=self._head_offset_y,
             head_tilt_deg=self._head_tilt_deg,
+            blend_shapes=self._blend_shapes,
+            vowels=self._vowels,
+            bones=self._bones,
         )
 
         # PIL(RGBA, tobytes)からQImageへ変換。PILの行の並びはQImageの
@@ -293,6 +339,21 @@ class PreviewPanel(QWidget):
         映像上のキャラクターに反映する。
         """
         self.preview.set_head_transform(offset_x, offset_y, tilt_deg)
+
+    def set_blend_shapes(self, blend_shapes: dict) -> None:
+        """VMC由来のブレンドシェイプを映像上のキャラクターに反映する。"""
+        self.preview.set_blend_shapes(blend_shapes)
+
+    def set_vowels(self, vowels: dict) -> None:
+        """音声解析由来の母音の重みを映像上のキャラクターに反映する。"""
+        self.preview.set_vowels(vowels)
+
+    def set_bone_transform(self, name: str, qx: float, qy: float, qz: float, qw: float) -> None:
+        """Head以外のボーン(腕など)の回転を映像上のキャラクターに反映する。"""
+        self.preview.set_bone_transform(name, qx, qy, qz, qw)
+
+    def set_character_visible(self, visible: bool) -> None:
+        self.preview.set_character_visible(visible)
 
     def cleanup(self) -> None:
         """ウィンドウが閉じられる際に呼び出す。"""

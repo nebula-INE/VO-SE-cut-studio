@@ -8,7 +8,7 @@ OSC/WebSocket等でPCへ低遅延ストリーミングし、画面上のキャ�
 (Virtual Motion Capture Protocol、OSCベース)のサブセットに対応させている。
 これにより、iPhoneのARKitトラッキングアプリ(waidayo等)やVSeeFace等、
 既存の実在アプリから直接モーションデータを受け取れる可能性がある。
-対応アプリの具体的な設定手順は docs/motion_capture_setup.md を参照。
+対応アプリの具体的な設定手順は motion_capture_setup.md(リポジトリ直下)を参照。
 
 対応しているメッセージ:
     /VMC/Ext/Bone/Pos (string boneName, f32 x, f32 y, f32 z,
@@ -50,6 +50,12 @@ class HeadTransform:
     offset_x: float = 0.0   # -1.0〜1.0程度を想定(正規化はしていない生の値)
     offset_y: float = 0.0
     tilt_deg: float = 0.0   # 首をかしげる角度(ロール)
+    # 3Dプレビュー(preview_3d.py)用の生データ。main_window.pyが参照する。
+    offset_z: float = 0.0
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+    qw: float = 1.0
 
 
 @dataclass
@@ -128,7 +134,10 @@ class OscMocapReceiver:
 
         if bone_name == "Head":
             tilt_deg = _quaternion_to_roll_deg(qx, qy, qz, qw)
-            self._on_head_transform(HeadTransform(offset_x=x, offset_y=y, tilt_deg=tilt_deg))
+            self._on_head_transform(HeadTransform(
+                offset_x=x, offset_y=y, tilt_deg=tilt_deg,
+                offset_z=z, qx=qx, qy=qy, qz=qz, qw=qw,
+            ))
         elif self._on_bone_transform is not None:
             self._on_bone_transform(BoneTransform(name=bone_name, x=x, y=y, z=z, qx=qx, qy=qy, qz=qz, qw=qw))
 

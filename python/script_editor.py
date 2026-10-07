@@ -3,9 +3,10 @@
 話者を選んでセリフを入力すると、チャット風のトランスクリプト表示と、
 下部のタイムライン(尺の目安つき)に自動で反映される。
 
-現時点ではVO-SE(音声合成)エンジンが未統合のため、各セリフの「尺」は
-文字数から概算した仮の値(estimated=True)を使っている。エンジン統合後は
-実際の合成音声の長さに差し替える想定(TODO: マーク箇所を参照)。
+各セリフの「尺」は、音声合成前は文字数からの概算値、合成後は実際のWAVの
+長さ(ScriptLine.actual_duration_sec)を使う。タイムライン・テロップ・再生位置の
+計算はすべてScriptLine.duration_secを参照するので、合成が終わった行から順に
+実測値へ置き換わる。
 
 ScriptEditorPanel は他のウィンドウに埋め込んで使う再利用可能なQWidget。
 このファイル単体では、ScriptEditorPanelをQMainWindowでラップしただけの
@@ -20,6 +21,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+import wave
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -47,11 +49,16 @@ from PySide6.QtWidgets import (
 
 try:
     from vose_worker import SynthesisLine, start_synthesis, DEFAULT_VOICEBANK_ROOT
-    from lipsync import extract_mouth_envelope, mouth_openness_at
     from voicebank_manager import VoicebankManager
     _VOSE_AVAILABLE = True
 except ImportError:
     _VOSE_AVAILABLE = False
+
+# lipsync(numpyのみ依存)はVO-SE連携とは独立してimportする。
+try:
+    from lipsync import extract_lipsync_frames, extract_mouth_envelope, mouth_openness_at, vowels_at
+except ImportError:
+    extract_lipsync_frames = extract_mouth_envelope = mouth_openness_at = vowels_at = None
 
 
 # --- 話者読み上げ速度の概算値(日本語, 文字/秒) ---
@@ -80,11 +87,27 @@ class ScriptLine:
     text: str
     line_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
+    # 音声合成後に、実際のWAVの長さ(秒)で埋まる。保存はしない(合成のたびに
+    # 取り直す。ボイスバンクや話者を変えると長さが変わるため)。
+    actual_duration_sec: float | None = field(default=None, compare=False)
+
     @property
     def estimated_duration_sec(self) -> float:
-        # TODO(VO-SE統合後): VO-SEが返す実際の音声長に置き換える。
-        # それまでは文字数からの概算値(estimated)を使う。
+        """文字数からの概算の尺(合成前の目安)。"""
         return max(MIN_ESTIMATED_DURATION_SEC, len(self.text) / ESTIMATED_CHARS_PER_SECOND)
+
+    @property
+    def is_estimated(self) -> bool:
+        return self.actual_duration_sec is None
+
+    @property
+    def duration_sec(self) -> float:
+        """タイムライン・テロップ・再生位置の計算に使う尺。
+        合成済みなら実際の音声の長さ、未合成なら概算値。
+        """
+        if self.actual_duration_sec is not None:
+            return max(0.05, self.actual_duration_sec)
+        return self.estimated_duration_sec
 
 
 class ScriptModel:
@@ -116,10 +139,10 @@ class ScriptModel:
         self.lines = [l for l in self.lines if l.line_id != line_id]
 
     def total_duration_sec(self) -> float:
-        return sum(l.estimated_duration_sec for l in self.lines)
+        return sum(l.duration_sec for l in self.lines)
 
     def line_at_time(self, t: float) -> ScriptLine | None:
-        """累積尺(各セリフのestimated_duration_secの積み上げ)から、
+        """累積尺(各セリフのduration_sec=実測または概算の積み上げ)から、
         経過時間tの時点で読み上げられているはずのセリフを返す。
         該当が無ければNone。テロップのプレビュー表示用。
         """
@@ -127,7 +150,7 @@ class ScriptModel:
             return None
         elapsed = 0.0
         for line in self.lines:
-            duration = line.estimated_duration_sec
+            duration = line.duration_sec
             if elapsed <= t < elapsed + duration:
                 return line
             elapsed += duration
@@ -262,7 +285,7 @@ class TimelineWidget(QWidget):
         for line in self.model.lines:
             speaker = self.model.speaker_by_name(line.speaker_name)
             color = QColor(speaker.color if speaker else "#888888")
-            width = max(20, int(line.estimated_duration_sec * self.PIXELS_PER_SECOND))
+            width = max(20, int(line.duration_sec * self.PIXELS_PER_SECOND))
 
             painter.setBrush(QBrush(color))
             painter.setPen(QPen(color.darker(150), 1))
@@ -302,6 +325,7 @@ class ScriptEditorPanel(QWidget):
 
     telop_changed = Signal(str)  # 現在アクティブなセリフのテキスト(無ければ空文字列)
     mouth_openness_changed = Signal(float)  # 現在の再生位置での口の開き具合(0.0〜1.0)
+    vowels_changed = Signal(dict)  # 現在の再生位置での母音の重み({"A":..})。無音なら空dict
 
     PLAYBACK_TICK_MS = 50
 
@@ -497,6 +521,8 @@ class ScriptEditorPanel(QWidget):
         self._synth_wav_paths.clear()
         self._playback_queue.clear()
         self._synth_pending_count = len(self.model.lines)
+        for line in self.model.lines:
+            line.actual_duration_sec = None  # 取り直す(失敗した行は概算に戻る)
 
         lines = []
         for line in self.model.lines:
@@ -513,8 +539,26 @@ class ScriptEditorPanel(QWidget):
 
     def _on_synth_line_ready(self, line_id: str, wav_path: str) -> None:
         self._synth_wav_paths[line_id] = wav_path
+
+        # 実際の音声の長さをタイムラインへ反映する(概算値からの置き換え)
+        line = next((l for l in self.model.lines if l.line_id == line_id), None)
+        if line is not None:
+            try:
+                with wave.open(wav_path, "rb") as w:
+                    line.actual_duration_sec = w.getnframes() / float(w.getframerate())
+            except Exception as e:  # noqa: BLE001 (読めなければ概算値のまま続行)
+                print(f"[尺] WAVの長さを取得できません line_id={line_id}: {e}")
+            self.timeline.updateGeometry()
+            self.timeline.update()
+            self._update_duration_label()
+
         try:
-            self._synth_envelopes[line_id] = extract_mouth_envelope(wav_path)
+            # 音量+母音(フォルマント)。母音解析に失敗しても音量だけで続行する。
+            try:
+                self._synth_envelopes[line_id] = extract_lipsync_frames(wav_path)
+            except Exception as e:  # noqa: BLE001
+                print(f"[リップシンク] 母音解析に失敗(音量のみで続行) line_id={line_id}: {e}")
+                self._synth_envelopes[line_id] = extract_mouth_envelope(wav_path)
         except Exception as e:  # noqa: BLE001 (エンベロープが無くてもテロップ/音声再生は継続する)
             print(f"[リップシンク] エンベロープ抽出に失敗 line_id={line_id}: {e}")
             self._synth_envelopes[line_id] = []
@@ -569,6 +613,7 @@ class ScriptEditorPanel(QWidget):
             return
         openness = mouth_openness_at(frames, position_ms / 1000.0)
         self.mouth_openness_changed.emit(openness)
+        self.vowels_changed.emit(vowels_at(frames, position_ms / 1000.0))
 
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -578,6 +623,7 @@ class ScriptEditorPanel(QWidget):
                 self._current_playing_line_id = None
                 self.telop_changed.emit("")  # 再生キューを使い切ったらテロップを消す
                 self.mouth_openness_changed.emit(0.0)  # 口を閉じる
+                self.vowels_changed.emit({})
 
     def start_preview_playback(self) -> None:
         if not self.model.lines:
@@ -611,7 +657,14 @@ class ScriptEditorPanel(QWidget):
 
     def _update_duration_label(self) -> None:
         total = self.model.total_duration_sec()
-        self.duration_label.setText(f"推定尺(仮): {total:.1f}秒 ※VO-SE統合前の概算値")
+        n = len(self.model.lines)
+        measured = sum(1 for l in self.model.lines if not l.is_estimated)
+        if n == 0 or measured == 0:
+            self.duration_label.setText(f"尺(概算): {total:.1f}秒 ※音声合成で実測値に更新")
+        elif measured == n:
+            self.duration_label.setText(f"尺(実測): {total:.1f}秒")
+        else:
+            self.duration_label.setText(f"尺: {total:.1f}秒 (実測{measured}/{n}行、残りは概算)")
 
     def save_script(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "台本を保存", "", "JSON (*.json)")

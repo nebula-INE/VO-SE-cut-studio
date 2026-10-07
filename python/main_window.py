@@ -13,11 +13,13 @@
 
 from __future__ import annotations
 
+import inspect
 import platform
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, Signal
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -64,6 +66,8 @@ class _MocapBridge(QObject):
     # (offset_x, offset_y, offset_z, qx, qy, qz, qw) -- 3D用。2D側と同じ受信データから
     # 生成されるが、ロール角だけに単純化していない生のクォータニオンをそのまま運ぶ。
     blend_shapes_received = Signal(dict)  # {ブレンドシェイプ名: 0〜1}
+    bone_transform_received = Signal(str, float, float, float, float)
+    # (ボーン名, qx, qy, qz, qw) -- Head以外のボーン(腕など)。2Dキャラの腕に反映する。
 
     def __init__(
         self,
@@ -75,14 +79,22 @@ class _MocapBridge(QObject):
         self._osc_receiver = OscMocapReceiver(
             on_head_transform=self._on_head_transform,
             on_blend_shapes=self._on_blend_shapes,
+            on_bone_transform=self._on_bone_transform,
             port=osc_port,
         ) if _OSC_AVAILABLE else None
 
-        self._websocket_receiver = WebSocketMocapReceiver(
-            on_head_transform=self._on_head_transform,
-            on_blend_shapes=self._on_blend_shapes,
-            port=websocket_port,
-        ) if _WEBSOCKET_AVAILABLE else None
+        self._websocket_receiver = None
+        if _WEBSOCKET_AVAILABLE:
+            ws_kwargs = dict(
+                on_head_transform=self._on_head_transform,
+                on_blend_shapes=self._on_blend_shapes,
+                port=websocket_port,
+            )
+            # WebSocket受信側がボーン通知に対応している場合だけ渡す(未対応の
+            # 実装でもTypeErrorで起動が止まらないようにする)。
+            if "on_bone_transform" in inspect.signature(WebSocketMocapReceiver.__init__).parameters:
+                ws_kwargs["on_bone_transform"] = self._on_bone_transform
+            self._websocket_receiver = WebSocketMocapReceiver(**ws_kwargs)
 
     def _on_head_transform(self, transform) -> None:
         # 受信スレッドから呼ばれる。Signal.emit()はスレッドセーフなので
@@ -95,6 +107,9 @@ class _MocapBridge(QObject):
 
     def _on_blend_shapes(self, blend_shapes: dict) -> None:
         self.blend_shapes_received.emit(blend_shapes)
+
+    def _on_bone_transform(self, bone) -> None:
+        self.bone_transform_received.emit(bone.name, bone.qx, bone.qy, bone.qz, bone.qw)
 
     def start(self) -> None:
         if self._osc_receiver is not None:
@@ -118,8 +133,11 @@ def _default_vose_lib_path() -> str | None:
     filename = {"Windows": "vose_core.dll", "Darwin": "libvose_core.dylib"}.get(system, "libvose_core.so")
 
     build_dir = Path(__file__).resolve().parent.parent / "build"
-    candidate = build_dir / filename
-    return str(candidate) if candidate.exists() else None
+    # MSVCのマルチ構成ジェネレータは build/Release/ 配下に出力する
+    for candidate in (build_dir / filename, build_dir / "Release" / filename):
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 class MainWindow(QMainWindow):
@@ -144,6 +162,8 @@ class MainWindow(QMainWindow):
         # 映像プレビューへテロップとしてオーバーレイ表示する。
         self.script_panel.telop_changed.connect(self.preview_panel.set_telop)
         self.script_panel.mouth_openness_changed.connect(self.preview_panel.set_mouth_openness)
+        # 音声解析(フォルマント)で推定した母音の口形も反映する。
+        self.script_panel.vowels_changed.connect(self.preview_panel.set_vowels)
 
         # モーションキャプチャ(VMCプロトコル/OSC・WebSocket)受信。スマホ等の
         # トラッキングアプリから頭の位置・傾きをリアルタイムに受け取り、
@@ -153,6 +173,7 @@ class MainWindow(QMainWindow):
             self.mocap_bridge = _MocapBridge(osc_port=39539, websocket_port=39540)
             self.mocap_bridge.head_transform_received.connect(self.preview_panel.set_head_transform)
             self.mocap_bridge.blend_shapes_received.connect(self.preview_panel.set_blend_shapes)
+            self.mocap_bridge.bone_transform_received.connect(self.preview_panel.set_bone_transform)
             self.mocap_bridge.start()
 
         # 3Dプレビュー(モード切り替え): 2Dキャラクター(上記)と全く同じ
@@ -204,6 +225,27 @@ class MainWindow(QMainWindow):
             toggle_3d_action = self.preview_3d_dock.toggleViewAction()
             toggle_3d_action.setText("3Dプレビューを表示(モーションキャプチャ)")
             view_menu.addAction(toggle_3d_action)
+
+            # モード切り替え: 2D(キャラのみ) / 3D(3Dプロキシのみ) / 2D+3D(両方)。
+            # どのモードでも同じモーションキャプチャデータで駆動される。
+            view_menu.addSeparator()
+            mode_menu = view_menu.addMenu("モード")
+            mode_group = QActionGroup(self)
+            mode_group.setExclusive(True)
+            for label, mode in (("2Dモード", "2d"), ("3Dモード", "3d"), ("2D+3D(並べて表示)", "both")):
+                action = mode_menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(mode == "2d")
+                action.triggered.connect(lambda _checked=False, m=mode: self.set_view_mode(m))
+                mode_group.addAction(action)
+
+    def set_view_mode(self, mode: str) -> None:
+        """表示モードを切り替える。mode: "2d" | "3d" | "both"。"""
+        show_2d = mode in ("2d", "both")
+        show_3d = mode in ("3d", "both")
+        self.preview_panel.set_character_visible(show_2d)
+        if self.preview_3d_dock is not None:
+            self.preview_3d_dock.setVisible(show_3d)
 
     def open_video_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

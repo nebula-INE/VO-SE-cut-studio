@@ -10,13 +10,24 @@ aural Studioでキャラクターを動かせる可能性があります。**
 
 | 種類 | メッセージ | 内容 |
 |---|---|---|
-| 頭の位置・傾き | `/VMC/Ext/Bone/Pos`(boneName=`"Head"`) | 位置(x, y)と、Z軸回転(首をかしげる動き)のみを使用 |
-| その他のボーン | `/VMC/Ext/Bone/Pos`(boneName≠`"Head"`) | 受信はするが、現時点ではキャラクター描画には未反映(将来の拡張用) |
-| 表情 | `/VMC/Ext/Blend/Val` + `/VMC/Ext/Blend/Apply` | `Blink`または`Blink_L`/`Blink_R`(まばたき)、`Joy`(笑顔)に対応 |
+| 頭の位置・傾き | `/VMC/Ext/Bone/Pos`(boneName=`"Head"`) | 2Dは位置(x, y)とZ軸回転(首をかしげる)、3Dプレビューはクォータニオン全体を使用。傾くのは頭だけで、体は動かない |
+| 腕のボーン | `/VMC/Ext/Bone/Pos`(`LeftUpperArm`/`LeftLowerArm`/`RightUpperArm`/`RightLowerArm`) | Z軸回転(ロール)で腕の角度を反映。1つでも受信すると体と腕を描画する。前腕は上腕からの相対回転として扱う |
+| 表情 | `/VMC/Ext/Blend/Val` + `/VMC/Ext/Blend/Apply` | `Blink`/`Blink_L`/`Blink_R`(まばたき)、`Joy`(笑顔)、`Angry`(つり眉・口角下げ)、`Sorrow`(困り眉・口角下げ)、`Fun`(目を細めて笑う) |
+| 母音の口形 | 同上 | `A`/`I`/`U`/`E`/`O`(VRM0.x系)および`aa`/`ih`/`ou`/`ee`/`oh`(VRM1.0系) |
 
-**未対応**: 全身のボーン(腕・脚等)を使った2D/3Dキャラクターの姿勢制御、
-`Blink`/`Joy`以外のブレンドシェイプ(`Angry`/`Sorrow`/`Fun`/母音の口形状等)。
-今後、キャラクター素材(イラスト/3Dモデル)側の対応が進み次第、拡張予定です。
+VRM1.0系の表情名(`happy`/`sad`/`relaxed`)も、内部で`Joy`/`Sorrow`/`Fun`に
+読み替えて受け付けます(`python/expression.py`)。
+
+**未対応**: 脚・胴体(Spine等)のボーン、`Surprised`等その他のブレンドシェイプ
+(受信はしますが描画には使いません)。腕の左右・回転の符号は実機の
+トラッキングデータでは未確認です(下記「動作確認用の疑似送信スクリプト」で
+確認できます)。
+
+モーションキャプチャを繋いだだけ(動画を開いていない状態)でも、暗い背景の上に
+キャラクターが表示されます。
+
+`表示` → `モード` から、2Dモード(キャラのみ)・3Dモード(3Dプロキシのみ)・
+2D+3D(両方)を切り替えられます。どのモードでも同じデータで駆動されます。
 
 ## 受信ポート
 
@@ -84,3 +95,26 @@ client.send_message('/VMC/Ext/Blend/Apply', [])
 - **ポート39539が使用中というエラーが出る**: 他のVMC対応アプリ(VSeeFace等)
   が同じポートで待ち受けていないか確認してください。1台のPCで同時に
   複数のVMC受信側を起動することはできません。
+
+腕を動かす例(左上腕をZ軸まわりに60度回転):
+
+```python
+import math
+half = math.radians(60) / 2
+client.send_message('/VMC/Ext/Bone/Pos',
+    ['LeftUpperArm', 0.0, 0.0, 0.0, 0.0, 0.0, math.sin(half), math.cos(half)])
+
+# 母音と表情
+client.send_message('/VMC/Ext/Blend/Val', ['aa', 1.0])
+client.send_message('/VMC/Ext/Blend/Val', ['happy', 0.8])
+client.send_message('/VMC/Ext/Blend/Apply', [])
+```
+
+## テストの実行
+
+GUI・FFmpeg・OpenGLが無くても動く純Pythonのテストがあります。
+
+```
+pip install -r requirements-dev.txt
+python -m pytest tests -q
+```

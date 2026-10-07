@@ -7,3 +7,9 @@
 PySide6>=6.5
 numpy>=1.24
 pyopenjtalk>=0.4.1
+# キャラクター描画(character_renderer.py)
+Pillow>=10.0
+# モーションキャプチャ受信(osc_receiver.py / VMCプロトコル)
+python-osc>=1.8
+# 3Dプレビュー(preview_3d.py)
+PyOpenGL>=3.1

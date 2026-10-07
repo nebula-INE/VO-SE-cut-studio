@@ -1,0 +1,3 @@
+# テスト実行用(GUI・FFmpeg・OpenGLが無くても動く純Pythonのテストのみ)
+-r requirements.txt
+pytest>=8.0

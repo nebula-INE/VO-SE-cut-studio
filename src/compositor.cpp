@@ -90,7 +90,12 @@ bool Compositor::init(int bg_width, int bg_height, int ov_width, int ov_height,
 
     // buffersinkの出力フォーマットをYUV420Pに固定
     enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE };
-    if (av_opt_set_int_list(sink_ctx_, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0) {
+    // Set the sentinel-terminated enum array directly. Avoid av_opt_set_int_list:
+    // some packaged FFmpeg builds no longer export its deprecated length helper.
+    if (av_opt_set_bin(sink_ctx_, "pix_fmts",
+                       reinterpret_cast<const uint8_t*>(pix_fmts),
+                       static_cast<int>(sizeof(pix_fmts)),
+                       AV_OPT_SEARCH_CHILDREN) < 0) {
         std::cerr << "[Compositor] Could not set output pixel format" << std::endl;
         close();
         return false;

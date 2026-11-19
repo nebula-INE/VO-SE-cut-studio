@@ -26,8 +26,9 @@ add_executable(aural-engine
 )
 
 target_include_directories(aural-engine PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    # Prefer headers from the same FFmpeg package as the linked libraries.
     ${FFMPEG_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/include
 )
 target_link_directories(aural-engine PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural-engine ${FFMPEG_LIBRARIES})
@@ -50,8 +51,9 @@ add_executable(aural-compose
 )
 
 target_include_directories(aural-compose PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    # Prefer headers from the same FFmpeg package as the linked libraries.
     ${FFMPEG_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/include
 )
 target_link_directories(aural-compose PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural-compose ${FFMPEG_LIBRARIES})
@@ -74,8 +76,9 @@ pybind11_add_module(aural_engine
 )
 
 target_include_directories(aural_engine PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    # Prefer headers from the same FFmpeg package as the linked libraries.
     ${FFMPEG_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/include
 )
 target_link_directories(aural_engine PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(aural_engine PRIVATE ${FFMPEG_LIBRARIES})

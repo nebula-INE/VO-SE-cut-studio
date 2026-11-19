@@ -11,6 +11,12 @@
     #include <GL/gl.h>
 #endif
 
+// Windows SDK exposes only OpenGL 1.1 constants in GL/gl.h.
+// GL_CLAMP_TO_EDGE is core since OpenGL 1.2; provide its standard value when absent.
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 // 補足: glGenTextures / glTexImage2D / glTexSubImage2D はいずれも OpenGL 1.1
 // のコア機能なので、現時点ではGLADやGLEWのようなローダーは不要。
 // ただし将来シェーダー(glCreateShader等、GL 2.0+)を使い始めたら

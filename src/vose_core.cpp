@@ -84,7 +84,19 @@ static VoseSharedMutex               g_bigvgan_mutex; // 前方で定義済み�
 #endif
 
 #include "vose_core.h"
-#include "voice_data.h"
+
+// Optional generated asset header. Standard builds load voicebank data at runtime
+// through load_embedded_resource(); custom builds may additionally provide
+// voice_data.h to register compiled-in voice assets.
+#if defined(__has_include)
+#  if __has_include("voice_data.h")
+#    include "voice_data.h"
+#    define VOSE_HAS_EMBEDDED_VOICE_DATA 1
+#  endif
+#endif
+#ifndef VOSE_HAS_EMBEDDED_VOICE_DATA
+#  define VOSE_HAS_EMBEDDED_VOICE_DATA 0
+#endif
 // ...existing code...
 
 #include "world/synthesis.h"
@@ -1297,7 +1309,11 @@ typedef int  (*CancelCheckCallback)();
 
 extern "C" {
 
-void init_official_engine() { register_all_embedded_voices(); }
+void init_official_engine() {
+#if VOSE_HAS_EMBEDDED_VOICE_DATA
+    register_all_embedded_voices();
+#endif
+}
 
 DLLEXPORT void load_embedded_resource(const char* phoneme,
                                       const int16_t* raw_data, int sample_count)

@@ -70,8 +70,12 @@ extern "C" {
     //    音源のオフセット/子音固定/ブランク等を正しく扱うには必須。
     DLLEXPORT void set_oto_data(const OtoEntry* entries, int count);
 
-    // 1. 音源をメモリにパッキングする（内蔵音源化の必須関数）
+    // 1. 音源をメモリにパッキングする（既存ABI互換: 44.1kHzとして登録）
     DLLEXPORT void load_embedded_resource(const char* phoneme, const int16_t* raw_data, int sample_count);
+
+    // サンプルレートを保持して音源を登録する拡張API。既存3引数APIは維持する。
+    DLLEXPORT void load_embedded_resource_ex(
+        const char* phoneme, const int16_t* raw_data, int sample_count, int sample_rate);
 
     // 2. レンダリング実行関数
     DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* output_path, int mode_flag);

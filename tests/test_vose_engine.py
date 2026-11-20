@@ -35,15 +35,16 @@ def _make_engine(monkeypatch, *, supports_sample_rate: bool):
     return vose_engine.VoseEngine("fake-vose-core"), library
 
 
-def test_load_embedded_resource_passes_original_sample_rate(monkeypatch) -> None:
+@pytest.mark.parametrize("sample_rate", [22050, 44100, 48000, 96000])
+def test_load_embedded_resource_passes_source_sample_rate(monkeypatch, sample_rate: int) -> None:
     engine, library = _make_engine(monkeypatch, supports_sample_rate=True)
 
-    engine.load_embedded_resource("あ", [0, 100, -100], 22050)
+    engine.load_embedded_resource("あ", [0, 100, -100], sample_rate)
 
     call = library.load_embedded_resource_ex.calls[0]
     assert call[0] == "あ".encode("utf-8")
     assert list(call[1]) == [0, 100, -100]
-    assert call[2:] == (3, 22050)
+    assert call[2:] == (3, sample_rate)
 
 
 def test_legacy_library_remains_supported_at_44100hz(monkeypatch) -> None:

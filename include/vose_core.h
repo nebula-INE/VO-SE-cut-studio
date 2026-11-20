@@ -73,7 +73,8 @@ extern "C" {
     // 1. 音源をメモリにパッキングする（既存ABI互換: 44.1kHzとして登録）
     DLLEXPORT void load_embedded_resource(const char* phoneme, const int16_t* raw_data, int sample_count);
 
-    // サンプルレートを保持して音源を登録する拡張API。既存3引数APIは維持する。
+    // 元WAVのサンプルレートを受け取り、エンジン内部の44.1kHzへ変換して登録する拡張API。
+    // 既存3引数APIは44.1kHz入力として扱い、ABI互換性を維持する。
     DLLEXPORT void load_embedded_resource_ex(
         const char* phoneme, const int16_t* raw_data, int sample_count, int sample_rate);
 

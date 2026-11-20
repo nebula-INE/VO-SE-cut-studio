@@ -1315,13 +1315,15 @@ void init_official_engine() {
 #endif
 }
 
-DLLEXPORT void load_embedded_resource(const char* phoneme,
-                                      const int16_t* raw_data, int sample_count)
+DLLEXPORT void load_embedded_resource_ex(const char* phoneme,
+                                         const int16_t* raw_data,
+                                         int sample_count,
+                                         int sample_rate)
 {
     if (!phoneme || !raw_data || sample_count <= 0) return;
 
     auto ev = std::make_shared<EmbeddedVoice>();
-    ev->fs = kFs;
+    ev->fs = sample_rate > 0 ? sample_rate : kFs;
     ev->waveform.resize(sample_count);
     for (int i = 0; i < sample_count; ++i)
         ev->waveform[i] = static_cast<double>(raw_data[i]) * kInv32768;
@@ -1331,6 +1333,13 @@ DLLEXPORT void load_embedded_resource(const char* phoneme,
     g_analysis_cache.erase(phoneme);
     ev->path = phoneme;
     g_voice_db.put(phoneme, std::move(ev));
+}
+
+// Keep the original exported symbol and behavior for older ctypes clients.
+DLLEXPORT void load_embedded_resource(const char* phoneme,
+                                      const int16_t* raw_data, int sample_count)
+{
+    load_embedded_resource_ex(phoneme, raw_data, sample_count, kFs);
 }
 
 // ============================================================

@@ -112,10 +112,18 @@ class VoseEngine:
         lib.set_oto_data.argtypes = [ctypes.POINTER(OtoEntry), ctypes.c_int]
         lib.set_oto_data.restype = None
 
-        lib.load_embedded_resource.argtypes = [
-            ctypes.c_char_p, ctypes.POINTER(ctypes.c_int16), ctypes.c_int,
-        ]
-        lib.load_embedded_resource.restype = None
+        self._load_embedded_resource_ex = getattr(lib, "load_embedded_resource_ex", None)
+        if self._load_embedded_resource_ex is not None:
+            self._load_embedded_resource_ex.argtypes = [
+                ctypes.c_char_p, ctypes.POINTER(ctypes.c_int16), ctypes.c_int, ctypes.c_int,
+            ]
+            self._load_embedded_resource_ex.restype = None
+        else:
+            # Compatibility with older vose_core binaries.
+            lib.load_embedded_resource.argtypes = [
+                ctypes.c_char_p, ctypes.POINTER(ctypes.c_int16), ctypes.c_int,
+            ]
+            lib.load_embedded_resource.restype = None
 
         lib.execute_render.argtypes = [
             ctypes.POINTER(NoteEvent), ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
@@ -168,11 +176,29 @@ class VoseEngine:
         # 完了すればkeep/arrは不要(即時解放して問題ない)。
 
     def load_embedded_resource(self, phoneme: str, samples: list[int], sample_rate: int) -> None:
-        """samples: 16bit PCM整数のリスト(int16範囲)。"""
+        """16bit PCM音源を、元WAVのサンプルレートを保ったまま登録する。"""
+        if not phoneme:
+            raise ValueError("phoneme must not be empty")
+        if not samples:
+            raise ValueError("samples must not be empty")
+        if not 8000 <= int(sample_rate) <= 384000:
+            raise ValueError(f"unsupported sample rate: {sample_rate}")
+        if min(samples) < -32768 or max(samples) > 32767:
+            raise ValueError("samples must fit in signed 16-bit PCM")
+
         count = len(samples)
         arr = (ctypes.c_int16 * count)(*samples)
         phoneme_bytes = phoneme.encode("utf-8")
-        self._lib.load_embedded_resource(phoneme_bytes, arr, count)
+        if self._load_embedded_resource_ex is not None:
+            self._load_embedded_resource_ex(phoneme_bytes, arr, count, int(sample_rate))
+        elif int(sample_rate) == 44100:
+            # Do not silently mislabel non-44.1kHz audio when using an old library.
+            self._lib.load_embedded_resource(phoneme_bytes, arr, count)
+        else:
+            raise RuntimeError(
+                "The loaded vose_core binary does not support source sample rates; "
+                "rebuild it to use load_embedded_resource_ex."
+            )
 
     def execute_render(self, notes: list[NoteEventData], output_path: str, mode_flag: int = 0) -> None:
         """notes: NoteEventDataのリスト。output_path: 出力wavファイルパス。"""

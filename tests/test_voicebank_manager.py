@@ -17,6 +17,7 @@ def test_safe_zip_member_stays_inside_destination(tmp_path: Path) -> None:
     [
         "../outside.wav",
         "voice/../../outside.wav",
+        "../voicebank-escape/payload.wav",  # sibling path sharing the destination prefix
         r"voice\\..\\outside.wav",
         r"C:\\Windows\\system.ini",
         r"\\server\\share\\outside.wav",

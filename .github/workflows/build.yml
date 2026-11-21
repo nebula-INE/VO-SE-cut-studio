@@ -44,8 +44,8 @@ jobs:
       - name: Run Python tests
         run: python -m pytest -q
 
-      - name: Verify VO-SE runtime library
-        run: python -c "import ctypes; ctypes.CDLL(r'build/Release/vose_core.dll')"
+      - name: Verify native release runtime
+        run: python scripts/smoke_release_artifacts.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -82,8 +82,8 @@ jobs:
       - name: Run Python tests
         run: python -m pytest -q
 
-      - name: Verify VO-SE runtime library
-        run: python -c "import ctypes; ctypes.CDLL('build/libvose_core.dylib')"
+      - name: Verify native release runtime
+        run: python scripts/smoke_release_artifacts.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -131,8 +131,8 @@ jobs:
       - name: Run Python tests
         run: python -m pytest -q
 
-      - name: Verify VO-SE runtime library
-        run: python -c "import ctypes; ctypes.CDLL('build/libvose_core.so')"
+      - name: Verify native release runtime
+        run: python scripts/smoke_release_artifacts.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

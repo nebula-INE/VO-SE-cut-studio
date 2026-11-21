@@ -503,6 +503,66 @@ static constexpr double kInv32768         = 1.0 / 32768.0;
 static constexpr int    kCrossfadeSamples = static_cast<int>(kFs * 0.030);
 static constexpr int    kMaxPitchLength   = 120000;
 static constexpr int    kTransitionFrames = static_cast<int>(60.0 / kFramePeriod);
+// Bump the cache signature because cached spectra made with non-44.1kHz source
+// rates used an FFT layout that did not match the fixed 44.1kHz renderer.
+static constexpr uint32_t kVoiceCacheMagic = 0x46534F56;
+
+static bool normalize_voice_sample_rate(std::vector<double>& waveform, int source_rate)
+{
+    if (waveform.empty() || source_rate < 8000 || source_rate > 384000) return false;
+    if (source_rate == kFs) return true;
+
+    // The synthesis path and its spectral buffers are deliberately fixed at
+    // 44.1kHz. Convert every source to that rate before WORLD analysis so
+    // CheapTrick, D4C, and VOSE_Synthesis all use the same FFT/sample-rate
+    // assumptions. A windowed-sinc low-pass resampler prevents aliasing when
+    // importing higher-rate voicebanks; 44.1kHz inputs remain bit-identical.
+    constexpr int kHalfTaps = 32;
+    const double source_per_output = static_cast<double>(source_rate) / kFs;
+    const double cutoff = std::min(1.0, static_cast<double>(kFs) / source_rate) * 0.99;
+    const auto output_count = static_cast<int64_t>(std::llround(
+        static_cast<double>(waveform.size()) * kFs / source_rate));
+    if (output_count <= 0 || output_count > 100'000'000) return false;
+
+    std::vector<double> resampled(static_cast<size_t>(output_count));
+    const int64_t input_count = static_cast<int64_t>(waveform.size());
+    for (int64_t out_index = 0; out_index < output_count; ++out_index) {
+        const double source_position = static_cast<double>(out_index) * source_per_output;
+        const int64_t center = static_cast<int64_t>(std::floor(source_position));
+        double weighted_sum = 0.0;
+        double weight_sum = 0.0;
+
+        for (int tap = -kHalfTaps + 1; tap <= kHalfTaps; ++tap) {
+            const int64_t source_index = center + tap;
+            if (source_index < 0 || source_index >= input_count) continue;
+
+            const double distance = source_position - static_cast<double>(source_index);
+            if (std::abs(distance) >= kHalfTaps) continue;
+
+            const double normalized = distance / kHalfTaps;
+            const double window = 0.42
+                + 0.50 * std::cos(M_PI * normalized)
+                + 0.08 * std::cos(2.0 * M_PI * normalized);
+            const double argument = M_PI * cutoff * distance;
+            const double sinc = std::abs(argument) < 1e-12
+                ? 1.0 : std::sin(argument) / argument;
+            const double weight = cutoff * sinc * window;
+
+            weighted_sum += waveform[static_cast<size_t>(source_index)] * weight;
+            weight_sum += weight;
+        }
+
+        if (std::abs(weight_sum) > 1e-12) {
+            resampled[static_cast<size_t>(out_index)] = weighted_sum / weight_sum;
+        } else {
+            const int64_t nearest = std::clamp<int64_t>(center, 0, input_count - 1);
+            resampled[static_cast<size_t>(out_index)] = waveform[static_cast<size_t>(nearest)];
+        }
+    }
+
+    waveform.swap(resampled);
+    return true;
+}
 
 static int64_t note_samples_safe(int p) {
     return (static_cast<int64_t>(p) - 1) * kFramePeriod / 1000.0 * kFs + 1;
@@ -528,7 +588,9 @@ std::shared_ptr<const EmbeddedVoice> find_voice_ref(const char* key)
             int nbit = 0;
             ev->waveform.resize(audio_len);
             wavread(key, &ev->fs, &nbit, ev->waveform.data());
-            
+            if (!normalize_voice_sample_rate(ev->waveform, ev->fs)) return nullptr;
+            ev->fs = kFs;
+
             g_voice_db.put(key, ev);
             return ev;
         }
@@ -564,7 +626,7 @@ static void save_cache(const std::string& cache_path, const AnalysisCache& cache
 
     bool ok = true;
     VoseCacheHeader header;
-    header.magic     = 0x45534F56;
+    header.magic     = kVoiceCacheMagic;
     header.length    = cache.length;
     header.spec_bins = cache.spec_bins;
 
@@ -607,7 +669,7 @@ static std::shared_ptr<AnalysisCache> load_cache(const std::string& path,
     if (!ifs.read(reinterpret_cast<char*>(&header), sizeof(header))) return nullptr;
 
     // マジック検証
-    if (header.magic != 0x45534F56) return nullptr;
+    if (header.magic != kVoiceCacheMagic) return nullptr;
 
     // サニティチェック: 長さ・spec_bins が異常値ならキャッシュ破棄（OOM防止）
     if (header.length <= 0 || header.length > 1'000'000) return nullptr;
@@ -1315,22 +1377,34 @@ void init_official_engine() {
 #endif
 }
 
-DLLEXPORT void load_embedded_resource(const char* phoneme,
-                                      const int16_t* raw_data, int sample_count)
+DLLEXPORT void load_embedded_resource_ex(const char* phoneme,
+                                         const int16_t* raw_data,
+                                         int sample_count,
+                                         int sample_rate)
 {
     if (!phoneme || !raw_data || sample_count <= 0) return;
 
+    if (sample_rate < 8000 || sample_rate > 384000) return;
+
     auto ev = std::make_shared<EmbeddedVoice>();
-    ev->fs = kFs;
     ev->waveform.resize(sample_count);
     for (int i = 0; i < sample_count; ++i)
         ev->waveform[i] = static_cast<double>(raw_data[i]) * kInv32768;
+    if (!normalize_voice_sample_rate(ev->waveform, sample_rate)) return;
+    ev->fs = kFs;
 
     VoseUniqueLock clock(g_analysis_cache_mutex);
     // パス文字列キーでキャッシュを無効化（再ロード時も確実にヒット）
     g_analysis_cache.erase(phoneme);
     ev->path = phoneme;
     g_voice_db.put(phoneme, std::move(ev));
+}
+
+// Keep the original exported symbol and behavior for older ctypes clients.
+DLLEXPORT void load_embedded_resource(const char* phoneme,
+                                      const int16_t* raw_data, int sample_count)
+{
+    load_embedded_resource_ex(phoneme, raw_data, sample_count, kFs);
 }
 
 // ============================================================

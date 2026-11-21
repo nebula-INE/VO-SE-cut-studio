@@ -130,13 +130,19 @@ def _default_vose_lib_path() -> str | None:
     無効化された状態でGUIは起動できる)。
     """
     system = platform.system()
-    filename = {"Windows": "vose_core.dll", "Darwin": "libvose_core.dylib"}.get(system, "libvose_core.so")
+    if system == "Windows":
+        filenames = ("vose_core.dll", "libvose_core.dll")  # second name supports older local builds
+    elif system == "Darwin":
+        filenames = ("libvose_core.dylib",)
+    else:
+        filenames = ("libvose_core.so",)
 
     build_dir = Path(__file__).resolve().parent.parent / "build"
     # MSVCのマルチ構成ジェネレータは build/Release/ 配下に出力する
-    for candidate in (build_dir / filename, build_dir / "Release" / filename):
-        if candidate.exists():
-            return str(candidate)
+    for filename in filenames:
+        for candidate in (build_dir / filename, build_dir / "Release" / filename):
+            if candidate.exists():
+                return str(candidate)
     return None
 
 

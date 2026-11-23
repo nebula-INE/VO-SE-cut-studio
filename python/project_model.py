@@ -354,16 +354,46 @@ class ProjectDocument:
     def _copy_asset_into_project(self, source: Path, kind: str) -> tuple[str, int | None]:
         if self.file_path is None:
             raise ProjectError("Save the project before copying assets into it")
-        root = self.file_path.parent
-        folder = root / "assets" / kind
+        root = self.file_path.parent.resolve()
+        assets_root = root / "assets"
+        folder = assets_root / kind
+
+        # Do not follow a pre-existing symlink out of the project directory.
+        # A downloaded project may contain a crafted assets/ or assets/<kind>
+        # symlink; copying through it would otherwise write outside the project.
+        for candidate in (assets_root, folder):
+            if candidate.exists() or candidate.is_symlink():
+                resolved = candidate.resolve()
+                try:
+                    resolved.relative_to(root)
+                except ValueError as exc:
+                    raise ProjectError(
+                        f"Asset storage path escapes the project folder: {candidate}"
+                    ) from exc
+
         folder.mkdir(parents=True, exist_ok=True)
+        resolved_folder = folder.resolve()
+        try:
+            resolved_folder.relative_to(root)
+        except ValueError as exc:
+            raise ProjectError(
+                f"Asset storage path escapes the project folder: {folder}"
+            ) from exc
+
         filename = _safe_asset_name(source.name)
         destination = folder / filename
         stem, suffix = destination.stem, destination.suffix
         counter = 2
-        while destination.exists():
+        while destination.exists() or destination.is_symlink():
             destination = folder / f"{stem}_{counter}{suffix}"
             counter += 1
+        try:
+            destination.resolve(strict=False).relative_to(root)
+        except ValueError as exc:
+            raise ProjectError(
+                f"Asset destination escapes the project folder: {destination}"
+            ) from exc
+
         try:
             if source.is_dir():
                 shutil.copytree(source, destination)

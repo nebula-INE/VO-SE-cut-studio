@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
         self._project.script = self.script_panel.model.to_dict()
         self._project_dirty = False
         self.script_panel.content_changed.connect(self._mark_project_dirty)
+        self.script_panel.asset_imported.connect(self._register_linked_asset)
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(30_000)

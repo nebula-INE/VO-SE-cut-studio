@@ -351,6 +351,30 @@ class ProjectDocument:
                     pass
             raise ProjectError(f"Could not save project {destination}: {exc}") from exc
 
+    def _copy_asset_into_project(self, source: Path, kind: str) -> tuple[str, int | None]:
+        if self.file_path is None:
+            raise ProjectError("Save the project before copying assets into it")
+        root = self.file_path.parent
+        folder = root / "assets" / kind
+        folder.mkdir(parents=True, exist_ok=True)
+        filename = _safe_asset_name(source.name)
+        destination = folder / filename
+        stem, suffix = destination.stem, destination.suffix
+        counter = 2
+        while destination.exists():
+            destination = folder / f"{stem}_{counter}{suffix}"
+            counter += 1
+        try:
+            if source.is_dir():
+                shutil.copytree(source, destination)
+                size_bytes = None
+            else:
+                shutil.copy2(source, destination)
+                size_bytes = destination.stat().st_size
+        except OSError as exc:
+            raise ProjectError(f"Could not copy asset {source}: {exc}") from exc
+        return destination.relative_to(root).as_posix(), size_bytes
+
     def add_asset(
         self,
         source_path: str | Path,
@@ -368,35 +392,23 @@ class ProjectDocument:
 
         resolved_source = source.resolve()
         for existing in self.assets:
+            if existing.kind != kind:
+                continue
             try:
                 if self.resolve_asset(existing) == resolved_source:
+                    # Opening a video first creates a linked reference. Let a later
+                    # explicit "copy into project" action promote that same entry.
+                    if copy_into_project and not existing.managed:
+                        existing.path, existing.size_bytes = self._copy_asset_into_project(
+                            resolved_source, kind
+                        )
+                        existing.managed = True
                     return existing
             except (OSError, ProjectError):
                 continue
 
         if copy_into_project:
-            if self.file_path is None:
-                raise ProjectError("Save the project before copying assets into it")
-            root = self.file_path.parent
-            folder = root / "assets" / kind
-            folder.mkdir(parents=True, exist_ok=True)
-            filename = _safe_asset_name(source.name)
-            destination = folder / filename
-            stem, suffix = destination.stem, destination.suffix
-            counter = 2
-            while destination.exists():
-                destination = folder / f"{stem}_{counter}{suffix}"
-                counter += 1
-            try:
-                if source.is_dir():
-                    shutil.copytree(source, destination)
-                    size_bytes = None
-                else:
-                    shutil.copy2(source, destination)
-                    size_bytes = destination.stat().st_size
-            except OSError as exc:
-                raise ProjectError(f"Could not copy asset {source}: {exc}") from exc
-            stored_path = destination.relative_to(root).as_posix()
+            stored_path, size_bytes = self._copy_asset_into_project(resolved_source, kind)
             managed = True
         else:
             stored_path = str(resolved_source)

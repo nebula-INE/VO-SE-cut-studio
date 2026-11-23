@@ -189,3 +189,16 @@ def test_windows_style_relative_traversal_is_rejected_on_all_hosts(tmp_path):
     loaded = ProjectDocument.from_dict(payload, tmp_path / "safe.auralproj")
     with pytest.raises(ProjectError, match="traversal"):
         loaded.resolve_asset("bad")
+
+def test_corrupt_newer_autosave_does_not_block_opening_saved_project(tmp_path):
+    path = tmp_path / "stable.auralproj"
+    project = ProjectDocument.create("Stable")
+    project.save(path)
+    autosave = ProjectDocument.autosave_path_for(path)
+    autosave.write_text("{corrupt", encoding="utf-8")
+    future = time.time() + 2
+    os.utime(autosave, (future, future))
+
+    loaded, recovered = ProjectDocument.load_with_recovery(path)
+    assert not recovered
+    assert loaded.name == "Stable"

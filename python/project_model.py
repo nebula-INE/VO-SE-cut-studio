@@ -18,7 +18,7 @@ import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -78,7 +78,11 @@ class ProjectAsset:
             raise ProjectError("Asset id, name and path must not be empty")
         if asset.kind not in ASSET_KINDS:
             raise ProjectError(f"Unsupported asset kind: {asset.kind}")
+        if not isinstance(data.get("managed", False), bool):
+            raise ProjectError("Asset managed flag must be a boolean")
         if asset.size_bytes is not None:
+            if isinstance(asset.size_bytes, bool):
+                raise ProjectError("Asset size_bytes must be an integer or null")
             try:
                 asset.size_bytes = int(asset.size_bytes)
             except (TypeError, ValueError) as exc:
@@ -134,7 +138,7 @@ class ProjectDocument:
         if data.get("project_format") != PROJECT_FORMAT:
             raise ProjectError("This file is not an aural Studio project")
         version = data.get("schema_version")
-        if version != PROJECT_SCHEMA_VERSION:
+        if type(version) is not int or version != PROJECT_SCHEMA_VERSION:
             raise ProjectError(
                 f"Unsupported project schema version: {version!r} "
                 f"(supported: {PROJECT_SCHEMA_VERSION})"
@@ -231,16 +235,81 @@ class ProjectDocument:
             destination = destination.with_suffix(PROJECT_SUFFIX)
         destination = destination.resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        self.updated_at = _utc_now()
-        self._write_atomic(destination)
+
+        previous_path = self.file_path
+        copied_assets: list[Path] = []
+        if previous_path is not None and previous_path.parent != destination.parent:
+            copied_assets = self._copy_managed_assets_to(destination.parent)
+
+        old_autosave = self.autosave_path_for(previous_path) if previous_path else None
+        try:
+            self.updated_at = _utc_now()
+            self._write_atomic(destination)
+        except Exception:
+            for copied in reversed(copied_assets):
+                try:
+                    if copied.is_dir():
+                        shutil.rmtree(copied)
+                    else:
+                        copied.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
+
         self.file_path = destination
-        autosave = self.autosave_path
-        if autosave and autosave.exists():
-            try:
-                autosave.unlink()
-            except OSError:
-                pass
+        new_autosave = self.autosave_path
+        for autosave in (old_autosave, new_autosave):
+            if autosave and autosave.exists():
+                try:
+                    autosave.unlink()
+                except OSError:
+                    pass
         return destination
+
+    def _copy_managed_assets_to(self, new_root: Path) -> list[Path]:
+        """Copy project-owned assets when Save As changes the project directory."""
+        if self.file_path is None:
+            return []
+        target_root = new_root.resolve()
+        copied: list[Path] = []
+        try:
+            for asset in self.assets:
+                if not asset.managed:
+                    continue
+                source = self.resolve_asset(asset)
+                if not source.exists():
+                    continue
+                relative = Path(asset.path)
+                destination = (target_root / relative).resolve()
+                try:
+                    destination.relative_to(target_root)
+                except ValueError as exc:
+                    raise ProjectError(
+                        f"Managed asset path escapes the project folder: {asset.path}"
+                    ) from exc
+                if destination.exists():
+                    raise ProjectError(
+                        f"Cannot Save As because an asset already exists at: {destination}"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_dir():
+                    shutil.copytree(source, destination)
+                else:
+                    shutil.copy2(source, destination)
+                copied.append(destination)
+        except Exception as exc:
+            for destination in reversed(copied):
+                try:
+                    if destination.is_dir():
+                        shutil.rmtree(destination)
+                    else:
+                        destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if isinstance(exc, ProjectError):
+                raise
+            raise ProjectError(f"Could not copy project assets during Save As: {exc}") from exc
+        return copied
 
     def save_autosave(self) -> Path:
         if self.file_path is None:
@@ -253,7 +322,10 @@ class ProjectDocument:
         return destination
 
     def _write_atomic(self, destination: Path) -> None:
-        payload = json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n"
+        try:
+            payload = json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n"
+        except (TypeError, ValueError) as exc:
+            raise ProjectError(f"Project data is not JSON serializable: {exc}") from exc
         temp_name: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -342,10 +414,18 @@ class ProjectDocument:
         if selected is None:
             raise KeyError(f"Unknown asset: {asset}")
         stored = Path(selected.path).expanduser()
+        windows_path = PureWindowsPath(selected.path)
         if stored.is_absolute():
             if selected.managed:
                 raise ProjectError("Managed assets must use project-relative paths")
             return stored.resolve()
+        if windows_path.is_absolute() or windows_path.drive:
+            if selected.managed:
+                raise ProjectError("Managed assets must use project-relative paths")
+            # Keep paths authored on Windows recognizable when opened elsewhere.
+            return stored
+        if ".." in PurePosixPath(selected.path).parts or ".." in windows_path.parts:
+            raise ProjectError(f"Asset path contains traversal components: {selected.path}")
         if self.file_path is None:
             raise ProjectError("Cannot resolve relative assets before the project is saved")
         root = self.file_path.parent.resolve()

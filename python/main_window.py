@@ -495,7 +495,10 @@ class MainWindow(QMainWindow):
         if not self._project.assets:
             QMessageBox.information(self, "素材参照の削除", "削除できる素材はありません。")
             return
-        labels = [f"{asset.name} [{asset.kind}]" for asset in self._project.assets]
+        labels = [
+            f"{index + 1}. {asset.name} [{asset.kind}]"
+            for index, asset in enumerate(self._project.assets)
+        ]
         selected, accepted = QInputDialog.getItem(
             self, "素材参照の削除", "削除する素材:", labels, 0, False
         )

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMainWindow,
     QMessageBox,
+    QInputDialog,
 )
 
 from preview import PreviewPanel
@@ -228,6 +229,8 @@ class MainWindow(QMainWindow):
         add_asset_action.triggered.connect(self.add_project_asset)
         show_assets_action = file_menu.addAction("プロジェクト素材一覧...")
         show_assets_action.triggered.connect(self.show_project_assets)
+        remove_asset_action = file_menu.addAction("素材参照を削除...")
+        remove_asset_action.triggered.connect(self.remove_project_asset)
 
         file_menu.addSeparator()
         open_video_action = file_menu.addAction("動画を開く...")
@@ -303,12 +306,14 @@ class MainWindow(QMainWindow):
         if not path:
             return False
         self._sync_project_script()
+        previous_name = self._project.name
+        self._project.name = Path(path).stem or previous_name
         try:
             saved_path = self._project.save(path)
         except (OSError, ProjectError) as exc:
+            self._project.name = previous_name
             QMessageBox.critical(self, "プロジェクト保存エラー", str(exc))
             return False
-        self._project.name = saved_path.stem
         self._project_dirty = False
         self._refresh_window_title()
         self.statusBar().showMessage(f"保存しました: {saved_path}", 5000)
@@ -330,6 +335,13 @@ class MainWindow(QMainWindow):
             return self.save_project()
         if choice == QMessageBox.StandardButton.Discard:
             self._project_dirty = False
+            autosave = self._project.autosave_path
+            if autosave and autosave.exists():
+                try:
+                    autosave.unlink()
+                except OSError:
+                    pass
+            self._refresh_window_title()
             return True
         return False
 
@@ -466,6 +478,40 @@ class MainWindow(QMainWindow):
             storage = "プロジェクト内" if asset.managed else "外部参照"
             lines.append(f"[{state}] {asset.kind} / {asset.name} — {storage}\n{asset.path}")
         QMessageBox.information(self, "プロジェクト素材", "\n\n".join(lines))
+
+    def remove_project_asset(self) -> None:
+        if not self._project.assets:
+            QMessageBox.information(self, "素材参照の削除", "削除できる素材はありません。")
+            return
+        labels = [f"{asset.name} [{asset.kind}]" for asset in self._project.assets]
+        selected, accepted = QInputDialog.getItem(
+            self, "素材参照の削除", "削除する素材:", labels, 0, False
+        )
+        if not accepted:
+            return
+        index = labels.index(selected)
+        asset = self._project.assets[index]
+        delete_file = False
+        if asset.managed:
+            answer = QMessageBox.question(
+                self,
+                "プロジェクト内の素材",
+                f"「{asset.name}」のファイルもプロジェクトから削除しますか？",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+            delete_file = answer == QMessageBox.StandardButton.Yes
+        try:
+            self._project.remove_asset(asset.id, delete_managed_file=delete_file)
+        except (OSError, ProjectError) as exc:
+            QMessageBox.critical(self, "素材参照の削除エラー", str(exc))
+            return
+        self._mark_project_dirty()
+        self.statusBar().showMessage(f"素材参照を削除しました: {asset.name}", 5000)
 
     def _autosave_project(self) -> None:
         if not self._project_dirty or self._project.file_path is None:

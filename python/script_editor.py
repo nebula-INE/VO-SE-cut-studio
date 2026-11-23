@@ -326,6 +326,7 @@ class ScriptEditorPanel(QWidget):
     telop_changed = Signal(str)  # 現在アクティブなセリフのテキスト(無ければ空文字列)
     mouth_openness_changed = Signal(float)  # 現在の再生位置での口の開き具合(0.0〜1.0)
     vowels_changed = Signal(dict)  # 現在の再生位置での母音の重み({"A":..})。無音なら空dict
+    content_changed = Signal()  # プロジェクト保存対象の台本内容が変更された
 
     PLAYBACK_TICK_MS = 50
 
@@ -433,6 +434,7 @@ class ScriptEditorPanel(QWidget):
         self.timeline.updateGeometry()
         self.timeline.update()
         self._update_duration_label()
+        self.content_changed.emit()
 
     def toggle_preview_playback(self) -> None:
         if self._is_previewing:
@@ -501,6 +503,7 @@ class ScriptEditorPanel(QWidget):
 
         self.model.add_speaker(speaker_name.strip(), color, voice_source=voicebank.id)
         self.chat_input._refresh_speakers()
+        self.content_changed.emit()
         QMessageBox.information(
             self, "ボイスバンクを追加",
             f"話者「{speaker_name.strip()}」を追加しました(ボイスバンク: {voicebank.name})。",
@@ -681,9 +684,26 @@ class ScriptEditorPanel(QWidget):
         self.load_script_from_path(path)
 
     def load_script_from_path(self, path: str) -> bool:
-        self.stop_preview_playback()
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001 (UIへのエラー表示が目的)
+            QMessageBox.critical(self, "読み込みエラー", str(e))
+            return False
+        if not self.load_script_data(data):
+            return False
+        self.content_changed.emit()
+        return True
+
+    def load_script_data(self, data: dict) -> bool:
+        """既存UIを再構築しながら台本データをロードする。
+
+        プロジェクトファイルからの読み込みにも使うため、ファイル選択UIは
+        呼び出し元に任せる。読込自体ではcontent_changedを発火しない。
+        """
+        self.stop_preview_playback()
+        try:
+            if not isinstance(data, dict):
+                raise ValueError("台本データはJSONオブジェクトである必要があります")
             self.model = ScriptModel.from_dict(data)
         except Exception as e:  # noqa: BLE001 (UIへのエラー表示が目的)
             QMessageBox.critical(self, "読み込みエラー", str(e))
@@ -701,6 +721,13 @@ class ScriptEditorPanel(QWidget):
         self.timeline.updateGeometry()
         self.timeline.update()
         self._update_duration_label()
+        self._synth_wav_paths.clear()
+        self._synth_envelopes.clear()
+        self._playback_queue.clear()
+        self._current_playing_line_id = None
+        self.telop_changed.emit("")
+        self.mouth_openness_changed.emit(0.0)
+        self.vowels_changed.emit({})
         return True
 
     def cleanup(self) -> None:

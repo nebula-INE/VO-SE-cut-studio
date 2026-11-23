@@ -195,7 +195,12 @@ class ProjectDocument:
             return document, False
         if not use_recovery:
             return document, False
-        recovered = cls.load(autosave)
+        try:
+            recovered = cls.load(autosave)
+        except (OSError, ProjectError):
+            # A truncated autosave must not make the last manually saved project
+            # impossible to open.
+            return document, False
         recovered.file_path = source
         return recovered, True
 

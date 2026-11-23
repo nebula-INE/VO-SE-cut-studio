@@ -202,3 +202,20 @@ def test_corrupt_newer_autosave_does_not_block_opening_saved_project(tmp_path):
     loaded, recovered = ProjectDocument.load_with_recovery(path)
     assert not recovered
     assert loaded.name == "Stable"
+
+def test_linked_asset_can_be_promoted_to_managed_copy(tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"portable-video")
+    project = ProjectDocument.create("Promote")
+    project.save(tmp_path / "promote.auralproj")
+
+    linked = project.add_asset(source, "video", copy_into_project=False)
+    assert not linked.managed
+    assert Path(linked.path).is_absolute()
+
+    managed = project.add_asset(source, "video", copy_into_project=True)
+    assert managed.id == linked.id
+    assert managed.managed
+    assert not Path(managed.path).is_absolute()
+    assert project.resolve_asset(managed).read_bytes() == b"portable-video"
+    assert len(project.assets) == 1

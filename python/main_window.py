@@ -389,6 +389,7 @@ class MainWindow(QMainWindow):
         self._project = project
         self._project_dirty = recovered
         self._refresh_window_title()
+        self.preview_panel.close_video()
 
         active_video_id = self._project.settings.get("active_video_asset_id")
         active_video = self._project.get_asset(active_video_id) if isinstance(active_video_id, str) else None

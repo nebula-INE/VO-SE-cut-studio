@@ -86,7 +86,7 @@ def test_relative_path_traversal_is_rejected(tmp_path):
         "path": "../outside.mp4", "managed": True,
     }]
     loaded = ProjectDocument.from_dict(payload, tmp_path / "safe.auralproj")
-    with pytest.raises(ProjectError, match="escapes"):
+    with pytest.raises(ProjectError, match="traversal"):
         loaded.resolve_asset("bad")
 
 

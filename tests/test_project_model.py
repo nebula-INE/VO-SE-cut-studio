@@ -156,3 +156,36 @@ def test_unknown_schema_version_is_rejected():
             "project_format": PROJECT_FORMAT,
             "schema_version": PROJECT_SCHEMA_VERSION + 1,
         })
+
+def test_save_as_copies_managed_assets_to_new_project_root(tmp_path):
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+
+    source = tmp_path / "audio.wav"
+    source.write_bytes(b"audio-data")
+    project = ProjectDocument.create("Move")
+    project.save(first_dir / "move.auralproj")
+    asset = project.add_asset(source, "audio", copy_into_project=True)
+    project.save()
+
+    new_path = project.save(second_dir / "renamed.auralproj")
+    assert new_path == second_dir / "renamed.auralproj"
+    assert project.resolve_asset(asset).read_bytes() == b"audio-data"
+    assert (first_dir / asset.path).read_bytes() == b"audio-data"
+    reloaded = ProjectDocument.load(new_path)
+    assert reloaded.resolve_asset(asset).read_bytes() == b"audio-data"
+
+
+def test_windows_style_relative_traversal_is_rejected_on_all_hosts(tmp_path):
+    project = ProjectDocument.create()
+    project.save(tmp_path / "safe.auralproj")
+    payload = project.to_dict()
+    payload["assets"] = [{
+        "id": "bad", "name": "bad", "kind": "video",
+        "path": r"..\\..\\outside.mp4", "managed": True,
+    }]
+    loaded = ProjectDocument.from_dict(payload, tmp_path / "safe.auralproj")
+    with pytest.raises(ProjectError, match="traversal"):
+        loaded.resolve_asset("bad")

@@ -701,6 +701,7 @@ class ScriptEditorPanel(QWidget):
         呼び出し元に任せる。読込自体ではcontent_changedを発火しない。
         """
         self.stop_preview_playback()
+        self.media_player.stop()
         try:
             if not isinstance(data, dict):
                 raise ValueError("台本データはJSONオブジェクトである必要があります")

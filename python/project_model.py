@@ -395,17 +395,18 @@ class ProjectDocument:
             if existing.kind != kind:
                 continue
             try:
-                if self.resolve_asset(existing) == resolved_source:
-                    # Opening a video first creates a linked reference. Let a later
-                    # explicit "copy into project" action promote that same entry.
-                    if copy_into_project and not existing.managed:
-                        existing.path, existing.size_bytes = self._copy_asset_into_project(
-                            resolved_source, kind
-                        )
-                        existing.managed = True
-                    return existing
+                existing_path = self.resolve_asset(existing)
             except (OSError, ProjectError):
                 continue
+            if existing_path == resolved_source:
+                # Opening a video first creates a linked reference. Let a later
+                # explicit "copy into project" action promote that same entry.
+                if copy_into_project and not existing.managed:
+                    existing.path, existing.size_bytes = self._copy_asset_into_project(
+                        resolved_source, kind
+                    )
+                    existing.managed = True
+                return existing
 
         if copy_into_project:
             stored_path, size_bytes = self._copy_asset_into_project(resolved_source, kind)

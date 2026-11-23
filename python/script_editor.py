@@ -327,6 +327,7 @@ class ScriptEditorPanel(QWidget):
     mouth_openness_changed = Signal(float)  # 現在の再生位置での口の開き具合(0.0〜1.0)
     vowels_changed = Signal(dict)  # 現在の再生位置での母音の重み({"A":..})。無音なら空dict
     content_changed = Signal()  # プロジェクト保存対象の台本内容が変更された
+    asset_imported = Signal(str, str)  # (path, kind) -- プロジェクト素材として登録する
 
     PLAYBACK_TICK_MS = 50
 
@@ -482,6 +483,8 @@ class ScriptEditorPanel(QWidget):
         except (FileNotFoundError, ValueError) as e:
             QMessageBox.critical(self, "ボイスバンクの取り込みに失敗", str(e))
             return
+
+        self.asset_imported.emit(voicebank.path, "voicebank")
 
         speaker_name, ok = QInputDialog.getText(
             self, "話者を追加", f"「{voicebank.name}」を使う話者の名前:",

@@ -390,6 +390,16 @@ class MainWindow(QMainWindow):
         self._project_dirty = recovered
         self._refresh_window_title()
 
+        active_video_id = self._project.settings.get("active_video_asset_id")
+        active_video = self._project.get_asset(active_video_id) if isinstance(active_video_id, str) else None
+        if active_video is not None:
+            try:
+                active_video_path = self._project.resolve_asset(active_video)
+                if active_video_path.is_file():
+                    self.preview_panel.open_video(str(active_video_path))
+            except (OSError, ProjectError):
+                pass
+
         missing = self._project.missing_assets()
         if missing:
             names = "\n".join(f"• {asset.name} ({asset.path})" for asset in missing[:10])
@@ -413,15 +423,16 @@ class MainWindow(QMainWindow):
             return "character"
         return "other"
 
-    def _register_linked_asset(self, path: str, kind: str) -> None:
+    def _register_linked_asset(self, path: str, kind: str):
         before = len(self._project.assets)
         try:
-            self._project.add_asset(path, kind, copy_into_project=False)
+            asset = self._project.add_asset(path, kind, copy_into_project=False)
         except (OSError, ProjectError) as exc:
             QMessageBox.warning(self, "素材登録エラー", str(exc))
-            return
+            return None
         if len(self._project.assets) != before:
             self._mark_project_dirty()
+        return asset
 
     def add_project_asset(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -537,7 +548,10 @@ class MainWindow(QMainWindow):
             self, "動画を開く", "", "動画ファイル (*.mp4 *.mov *.mkv *.avi);;すべてのファイル (*)"
         )
         if path and self.preview_panel.open_video(path):
-            self._register_linked_asset(path, "video")
+            asset = self._register_linked_asset(path, "video")
+            if asset is not None:
+                self._project.settings["active_video_asset_id"] = asset.id
+                self._mark_project_dirty()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
         if not self._confirm_discard_changes():
@@ -559,7 +573,10 @@ def main() -> int:
     if len(sys.argv) > 1:
         startup_video = sys.argv[1]
         if window.preview_panel.open_video(startup_video):
-            window._register_linked_asset(startup_video, "video")
+            asset = window._register_linked_asset(startup_video, "video")
+            if asset is not None:
+                window._project.settings["active_video_asset_id"] = asset.id
+                window._mark_project_dirty()
 
     window.show()
     return app.exec()

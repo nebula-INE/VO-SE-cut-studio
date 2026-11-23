@@ -219,3 +219,21 @@ def test_linked_asset_can_be_promoted_to_managed_copy(tmp_path):
     assert not Path(managed.path).is_absolute()
     assert project.resolve_asset(managed).read_bytes() == b"portable-video"
     assert len(project.assets) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require elevated privileges on Windows")
+def test_managed_asset_copy_rejects_assets_symlink_outside_project(tmp_path):
+    project_root = tmp_path / "project"
+    outside_root = tmp_path / "outside"
+    project_root.mkdir()
+    outside_root.mkdir()
+    project = ProjectDocument.create("Symlink Safety")
+    project.save(project_root / "safe.auralproj")
+
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"do-not-write-outside")
+    (project_root / "assets").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ProjectError, match="escapes the project folder"):
+        project.add_asset(source, "other", copy_into_project=True)
+    assert list(outside_root.iterdir()) == []

@@ -46,6 +46,13 @@ def timeline_video_clips(model: TimelineModel) -> list[TimelineClip]:
     for track in model.tracks:
         if track.muted or not track.visible:
             continue
+        if track.kind == "motion":
+            unsupported.extend(
+                f"motion: {clip.name}"
+                for clip in model.clips_for_track(track.id)
+                if clip.enabled
+            )
+            continue
         if track.kind not in {"video", "overlay", "other"}:
             continue
         for clip in model.clips_for_track(track.id):
@@ -129,6 +136,16 @@ def render_timeline_video(
             )
         resolved.append((clip, source))
 
+    destination = Path(output_path).expanduser()
+    if destination.suffix.lower() != ".mp4":
+        raise VideoRenderError("タイムライン映像の出力先は .mp4 を指定してください")
+    try:
+        destination = destination.resolve()
+        if destination in {path for _clip, path in resolved}:
+            raise VideoRenderError("元の映像・画像素材を上書きすることはできません")
+    except OSError as exc:
+        raise VideoRenderError(f"出力先を確認できません: {exc}") from exc
+
     first_video = next(
         ((clip, path) for clip, path in resolved if clip.kind == "video"),
         None,
@@ -151,13 +168,7 @@ def render_timeline_video(
         raise VideoRenderError(f"出力解像度が不正です: {width}x{height}")
 
     executable = find_ffmpeg_executable(ffmpeg_path)
-    destination = Path(output_path).expanduser()
-    if destination.suffix.lower() != ".mp4":
-        raise VideoRenderError("タイムライン映像の出力先は .mp4 を指定してください")
     try:
-        destination = destination.resolve()
-        if destination in {path for _clip, path in resolved}:
-            raise VideoRenderError("元の映像・画像素材を上書きすることはできません")
         destination.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise VideoRenderError(f"出力フォルダーを作成できません: {exc}") from exc
@@ -231,7 +242,6 @@ def render_timeline_video(
         "-preset", "medium",
         "-crf", "20",
         "-pix_fmt", "yuv420p",
-        "-fps_mode", "cfr",
         "-movflags", "+faststart",
         "-t", _filter_number(duration),
         str(temporary),

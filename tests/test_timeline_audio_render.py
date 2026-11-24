@@ -225,3 +225,18 @@ def test_mixdown_reports_progress_in_monotonic_frame_ranges(tmp_path):
     assert progress
     assert progress[-1] == (800, 800)
     assert all(progress[i][0] < progress[i + 1][0] for i in range(len(progress) - 1))
+
+
+
+def test_mixdown_rejects_overwriting_a_source_asset(tmp_path):
+    source_path = _write_pcm_wav(tmp_path / "source.wav", np.full(800, 0.2))
+    model, track = _audio_timeline()
+    model.add_clip(track.id, "audio", "source", 0.1, asset_id="source")
+    original = source_path.read_bytes()
+
+    with pytest.raises(AudioRenderError, match="must not overwrite source"):
+        render_timeline_audio(
+            model, lambda _clip: source_path, source_path, sample_rate=8_000
+        )
+
+    assert source_path.read_bytes() == original

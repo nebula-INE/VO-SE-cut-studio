@@ -37,7 +37,6 @@ from timeline_editor import TimelineEditorWidget
 from timeline_model import TimelineError, TimelineModel
 from timeline_audio import TimelineAudioPlayback
 from timeline_audio_render import (
-    AudioRenderError,
     render_timeline_audio,
     timeline_audio_clips,
 )
@@ -1135,7 +1134,6 @@ class MainWindow(QMainWindow):
             return
         if clip.kind == "video" and self.preview_panel.decoder is not None:
             self.preview_panel.seek_to(clip.source_time_at(self.timeline_panel.playhead_seconds))
-
 
     def export_timeline_audio_mix(self) -> None:
         """Export all enabled, unmuted timeline audio/voice clips as one WAV mix."""

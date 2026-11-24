@@ -263,6 +263,10 @@ def render_timeline_audio(
                 raise AudioRenderError(
                     f"Could not resolve audio asset for clip '{clip.name}': {exc}"
                 ) from exc
+            if resolved == destination.resolve():
+                raise AudioRenderError(
+                    f"Output must not overwrite source audio asset: {resolved}"
+                )
             if not resolved.is_file():
                 raise AudioRenderError(
                     f"Audio asset for clip '{clip.name}' does not exist: {resolved}"

@@ -651,6 +651,11 @@ class MainWindow(QMainWindow):
             try:
                 if self.preview_panel.decoder is None or previous_asset_id != asset.id:
                     opened = self.preview_panel.open_video(str(path))
+                    # open_video() starts the source preview at frame zero.
+                    # Timeline clips may be trimmed, so seek to source_in before
+                    # the next timer tick decodes the first playback frame.
+                    if opened:
+                        opened = self.preview_panel.seek_to(clip.source_in)
                 else:
                     opened = self.preview_panel.seek_to(clip.source_in)
                     if opened:

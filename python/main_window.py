@@ -494,42 +494,17 @@ class MainWindow(QMainWindow):
                 and asset is not None
                 and asset.kind == "audio"
             ):
-                existing = next(
-                    (
-                        clip for clip in model.clips
-                        if clip.kind == "voice" and clip.script_line_id == line.line_id
-                    ),
-                    None,
-                )
                 clip_name = f"{line.speaker_name}: {line.text[:28]}".strip()
                 duration = max(0.05, line.duration_sec)
-                if existing is None:
-                    model.add_clip(
-                        voice_track.id,
-                        "voice",
-                        clip_name or "Voice",
-                        duration,
-                        start=timeline_start,
-                        asset_id=asset.id,
-                        script_line_id=line.line_id,
-                    )
-                    changed = True
-                else:
-                    desired = (
-                        existing.track_id != voice_track.id
-                        or existing.name != (clip_name or "Voice")
-                        or abs(existing.start - timeline_start) > 1e-6
-                        or abs(existing.duration - duration) > 1e-6
-                        or existing.asset_id != asset.id
-                    )
-                    if desired:
-                        existing.track_id = voice_track.id
-                        existing.name = clip_name or "Voice"
-                        existing.start = timeline_start
-                        existing.duration = duration
-                        existing.source_in = 0.0
-                        existing.asset_id = asset.id
-                        changed = True
+                _voice_clip, clip_changed = model.upsert_voice_clip(
+                    voice_track.id,
+                    clip_name or "Voice",
+                    duration,
+                    start=timeline_start,
+                    asset_id=asset.id,
+                    script_line_id=line.line_id,
+                )
+                changed = changed or clip_changed
             timeline_start += line.duration_sec
 
         if changed:

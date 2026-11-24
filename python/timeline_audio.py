@@ -173,7 +173,7 @@ class TimelineAudioPlayback(QObject):
                 path = self._asset_resolver(clip).expanduser().resolve()
                 if not path.is_file():
                     raise FileNotFoundError(path)
-            except (OSError, ValueError, RuntimeError) as exc:
+            except Exception as exc:
                 self._failed_clips.add(clip.id)
                 self.error.emit(f"音声素材が見つかりません: {clip.name} ({exc})")
                 continue

@@ -204,7 +204,7 @@ def test_render_timeline_video_rejects_duration_shorter_than_clip(tmp_path):
     video_path.write_bytes(b"video")
     image_path.write_bytes(b"image")
 
-    with pytest.raises(VideoRenderError, match="終端より短い"):
+    with pytest.raises(VideoRenderError, match="終端より短く"):
         render_timeline_video(
             model,
             lambda clip: {video.id: video_path, image.id: image_path}[clip.id],

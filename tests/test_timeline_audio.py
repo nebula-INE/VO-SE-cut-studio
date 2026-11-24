@@ -53,3 +53,13 @@ def test_audio_schedule_ignores_disabled_and_non_audio_clips():
     )
 
     assert active_audio_clips(model, 1.0) == []
+
+
+def test_voice_clips_are_scheduled_as_audio():
+    model = TimelineModel.create_default()
+    audio_track = next(track for track in model.tracks if track.kind == "audio")
+    voice = model.add_clip(
+        audio_track.id, "voice", "narration.wav", 1.5, asset_id="voice"
+    )
+
+    assert active_audio_clips(model, 0.5) == [(voice, audio_track)]

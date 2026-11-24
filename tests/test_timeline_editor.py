@@ -17,6 +17,13 @@ from timeline_model import TimelineModel
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+    # Release every top-level test widget while QApplication is still alive.
+    # This avoids PySide6's shared-QObject teardown abort on macOS runners.
+    for widget in app.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
 
 
 def _model_with_locked_clip():

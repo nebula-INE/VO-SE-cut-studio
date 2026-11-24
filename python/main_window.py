@@ -46,6 +46,11 @@ from media_ffmpeg import (
     find_ffmpeg_executable,
     mux_audio_into_video,
 )
+from timeline_video_render import (
+    VideoRenderError,
+    render_timeline_video,
+    timeline_video_clips,
+)
 
 try:
     from osc_receiver import OscMocapReceiver
@@ -241,6 +246,79 @@ class _TimelineAudioVideoExportTask(QRunnable):
             self.signals.failed.emit(str(exc))
 
 
+
+class _TimelineFullVideoExportTask(QRunnable):
+    """Render all supported visual clips and optionally add the timeline audio mix."""
+
+    def __init__(
+        self,
+        timeline_payload: dict,
+        asset_paths: dict[str, str],
+        output_path: str,
+        ffmpeg_path: str,
+    ) -> None:
+        super().__init__()
+        self.timeline_payload = timeline_payload
+        self.asset_paths = asset_paths
+        self.output_path = output_path
+        self.ffmpeg_path = ffmpeg_path
+        self.signals = _TimelineAudioRenderSignals()
+
+    def run(self) -> None:
+        try:
+            model = TimelineModel.from_dict(self.timeline_payload)
+            visual_clips = timeline_video_clips(model)
+            audio_clips = timeline_audio_clips(model)
+            duration = max(
+                [clip.end for clip in visual_clips]
+                + [clip.end for clip in audio_clips]
+            )
+            with tempfile.TemporaryDirectory(prefix="aural-timeline-video-") as work_dir:
+                silent_video_path = (
+                    Path(work_dir) / "timeline_video.mp4"
+                    if audio_clips else Path(self.output_path)
+                )
+                video_result = render_timeline_video(
+                    model,
+                    lambda clip: self.asset_paths[clip.id],
+                    silent_video_path,
+                    duration_seconds=duration,
+                    ffmpeg_path=self.ffmpeg_path,
+                )
+                clipped_sample_count = 0
+                peak_level = 0.0
+                if audio_clips:
+                    audio_path = Path(work_dir) / "timeline_audio.wav"
+                    audio_result = render_timeline_audio(
+                        model,
+                        lambda clip: self.asset_paths[clip.id],
+                        audio_path,
+                        duration_seconds=duration,
+                        ffmpeg_path=self.ffmpeg_path,
+                    )
+                    mux_audio_into_video(
+                        video_result.output_path,
+                        audio_result.output_path,
+                        self.output_path,
+                        ffmpeg_path=self.ffmpeg_path,
+                    )
+                    clipped_sample_count = audio_result.clipped_sample_count
+                    peak_level = audio_result.peak_level
+            self.signals.finished.emit({
+                "output_path": str(Path(self.output_path).expanduser().resolve()),
+                "video_clip_count": video_result.video_clip_count,
+                "audio_clip_count": len(audio_clips),
+                "duration_seconds": video_result.duration_seconds,
+                "width": video_result.width,
+                "height": video_result.height,
+                "frame_rate": video_result.frame_rate,
+                "clipped_sample_count": clipped_sample_count,
+                "peak_level": peak_level,
+            })
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -276,8 +354,10 @@ class MainWindow(QMainWindow):
         self._audio_render_pool.setMaxThreadCount(1)
         self._audio_render_task: _TimelineAudioRenderTask | None = None
         self._audio_video_export_task: _TimelineAudioVideoExportTask | None = None
+        self._timeline_video_export_task: _TimelineFullVideoExportTask | None = None
         self._export_audio_mix_action = None
         self._export_audio_video_action = None
+        self._export_timeline_video_action = None
         self._active_timeline_video_clip_id: str | None = None
         self._timeline_playback_requested = False
         self._timeline_playback_transition = False
@@ -406,6 +486,11 @@ class MainWindow(QMainWindow):
             "完成映像にタイムライン音声を統合してMP4に書き出す..."
         )
         self._export_audio_video_action.triggered.connect(self.export_timeline_audio_video)
+        timeline_menu.addSeparator()
+        self._export_timeline_video_action = timeline_menu.addAction(
+            "タイムライン全体をMP4に書き出す..."
+        )
+        self._export_timeline_video_action.triggered.connect(self.export_timeline_full_video)
 
         view_menu = menu_bar.addMenu("表示")
         toggle_script_action = self.script_dock.toggleViewAction()
@@ -1199,7 +1284,11 @@ class MainWindow(QMainWindow):
 
     def export_timeline_audio_mix(self) -> None:
         """Export all enabled, unmuted timeline audio/voice clips as one WAV mix."""
-        if self._audio_render_task is not None or self._audio_video_export_task is not None:
+        if (
+            self._audio_render_task is not None
+            or self._audio_video_export_task is not None
+            or self._timeline_video_export_task is not None
+        ):
             self.statusBar().showMessage("音声・動画を書き出し中です", 5000)
             return
 
@@ -1273,10 +1362,15 @@ class MainWindow(QMainWindow):
             self._export_audio_mix_action.setEnabled(enabled)
         if self._export_audio_video_action is not None:
             self._export_audio_video_action.setEnabled(enabled)
+        if self._export_timeline_video_action is not None:
+            self._export_timeline_video_action.setEnabled(enabled)
 
     def _finish_timeline_audio_render(self) -> None:
         self._audio_render_task = None
-        self._set_audio_export_actions_enabled(self._audio_video_export_task is None)
+        self._set_audio_export_actions_enabled(
+            self._audio_video_export_task is None
+            and self._timeline_video_export_task is None
+        )
 
     def _on_timeline_audio_render_finished(self, result) -> None:
         self._finish_timeline_audio_render()
@@ -1305,7 +1399,11 @@ class MainWindow(QMainWindow):
 
     def export_timeline_audio_video(self) -> None:
         """Render the timeline mix and add it to an existing composed video."""
-        if self._audio_render_task is not None or self._audio_video_export_task is not None:
+        if (
+            self._audio_render_task is not None
+            or self._audio_video_export_task is not None
+            or self._timeline_video_export_task is not None
+        ):
             self.statusBar().showMessage("別のメディア書き出しが実行中です", 5000)
             return
 
@@ -1387,7 +1485,10 @@ class MainWindow(QMainWindow):
 
     def _finish_timeline_audio_video_export(self) -> None:
         self._audio_video_export_task = None
-        self._set_audio_export_actions_enabled(self._audio_render_task is None)
+        self._set_audio_export_actions_enabled(
+            self._audio_render_task is None
+            and self._timeline_video_export_task is None
+        )
 
     def _on_timeline_audio_video_export_finished(self, result: dict) -> None:
         self._finish_timeline_audio_video_export()
@@ -1412,6 +1513,134 @@ class MainWindow(QMainWindow):
         self._finish_timeline_audio_video_export()
         QMessageBox.critical(self, "映像・音声の統合に失敗しました", message)
         self.statusBar().showMessage("MP4への音声統合に失敗しました", 8000)
+
+    def export_timeline_full_video(self) -> None:
+        """Render video/image clips from the timeline and include audio when present."""
+        if (
+            self._audio_render_task is not None
+            or self._audio_video_export_task is not None
+            or self._timeline_video_export_task is not None
+        ):
+            self.statusBar().showMessage("別のメディア書き出しが実行中です", 5000)
+            return
+
+        try:
+            ffmpeg_path = find_ffmpeg_executable()
+        except MediaToolError as exc:
+            QMessageBox.warning(self, "FFmpegが必要です", str(exc))
+            return
+
+        try:
+            snapshot = TimelineModel.from_dict(self.timeline_panel.model.to_dict())
+            visual_clips = timeline_video_clips(snapshot)
+        except (TimelineError, VideoRenderError) as exc:
+            QMessageBox.warning(self, "タイムラインMP4書き出し", str(exc))
+            return
+        if not visual_clips:
+            QMessageBox.information(
+                self,
+                "タイムラインMP4書き出し",
+                "表示中で有効な動画・静止画クリップがありません。",
+            )
+            return
+
+        audio_clips = timeline_audio_clips(snapshot)
+        all_clips = visual_clips + audio_clips
+        try:
+            asset_paths: dict[str, str] = {}
+            for clip in all_clips:
+                asset = self._project.get_asset(clip.asset_id or "")
+                if asset is None:
+                    raise ProjectError(f"クリップ「{clip.name}」の素材参照がありません")
+                resolved = self._project.resolve_asset(asset).expanduser().resolve()
+                if not resolved.is_file():
+                    raise ProjectError(f"素材ファイルが見つかりません: {resolved}")
+                asset_paths[clip.id] = str(resolved)
+        except (OSError, ProjectError, ValueError) as exc:
+            QMessageBox.warning(self, "タイムライン素材エラー", str(exc))
+            return
+
+        suggested = (
+            self._project.file_path.with_name(
+                f"{self._project.file_path.stem}_timeline.mp4"
+            )
+            if self._project.file_path is not None
+            else Path.home() / "aural_timeline.mp4"
+        )
+        output_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "タイムライン全体をMP4に書き出す",
+            str(suggested),
+            "MP4動画 (*.mp4)",
+        )
+        if not output_name:
+            return
+        output_path = Path(output_name).expanduser()
+        if output_path.suffix.lower() != ".mp4":
+            QMessageBox.warning(
+                self, "タイムラインMP4書き出し", "出力先は .mp4 を指定してください。"
+            )
+            return
+
+        protected_sources = {Path(path).resolve() for path in asset_paths.values()}
+        if output_path.resolve() in protected_sources:
+            QMessageBox.warning(
+                self,
+                "タイムラインMP4書き出し",
+                "元の映像・画像・音声素材を上書きできません。別の出力先を指定してください。",
+            )
+            return
+
+        task = _TimelineFullVideoExportTask(
+            snapshot.to_dict(),
+            asset_paths,
+            str(output_path),
+            ffmpeg_path,
+        )
+        task.signals.finished.connect(self._on_timeline_full_video_export_finished)
+        task.signals.failed.connect(self._on_timeline_full_video_export_failed)
+        self._timeline_video_export_task = task
+        self._set_audio_export_actions_enabled(False)
+        self.statusBar().showMessage(
+            f"タイムライン映像を書き出しています... "
+            f"(映像・静止画 {len(visual_clips)} / 音声 {len(audio_clips)} クリップ)",
+            0,
+        )
+        self._audio_render_pool.start(task)
+
+    def _finish_timeline_full_video_export(self) -> None:
+        self._timeline_video_export_task = None
+        self._set_audio_export_actions_enabled(
+            self._audio_render_task is None
+            and self._audio_video_export_task is None
+        )
+
+    def _on_timeline_full_video_export_finished(self, result: dict) -> None:
+        self._finish_timeline_full_video_export()
+        summary = (
+            "タイムライン全体をMP4に書き出しました。\\n"
+            f"保存先: {result['output_path']}\\n"
+            f"映像・静止画: {result['video_clip_count']} クリップ / "
+            f"音声: {result['audio_clip_count']} クリップ\\n"
+            f"解像度: {result['width']}×{result['height']} / "
+            f"{result['frame_rate']:g} fps / {result['duration_seconds']:.2f} 秒"
+        )
+        if result["clipped_sample_count"]:
+            summary += (
+                f"\\n\\n注意: 音声ミックスで {result['clipped_sample_count']:,} "
+                "サンプルが上限を超えました。音量を下げて再出力してください。"
+            )
+            QMessageBox.warning(self, "MP4書き出し完了（音割れの可能性）", summary)
+        else:
+            QMessageBox.information(self, "MP4書き出し完了", summary)
+        self.statusBar().showMessage(
+            f"MP4を書き出しました: {result['output_path']}", 8000
+        )
+
+    def _on_timeline_full_video_export_failed(self, message: str) -> None:
+        self._finish_timeline_full_video_export()
+        QMessageBox.critical(self, "タイムラインMP4書き出しに失敗しました", message)
+        self.statusBar().showMessage("タイムラインMP4書き出しに失敗しました", 8000)
 
     def add_script_lines_to_timeline(self) -> None:
         """Place script lines on an overlay track as linked text clips.
@@ -1767,7 +1996,11 @@ class MainWindow(QMainWindow):
                 self._mark_project_dirty()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
-        if self._audio_render_task is not None or self._audio_video_export_task is not None:
+        if (
+            self._audio_render_task is not None
+            or self._audio_video_export_task is not None
+            or self._timeline_video_export_task is not None
+        ):
             QMessageBox.information(
                 self,
                 "メディアを書き出し中",

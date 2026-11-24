@@ -165,3 +165,58 @@ def test_mux_rejects_output_same_as_video_or_non_mp4(tmp_path):
         mux_audio_into_video(video, audio, video, ffmpeg_path=executable)
     with pytest.raises(MediaToolError, match=".mp4"):
         mux_audio_into_video(video, audio, tmp_path / "final.mov", ffmpeg_path=executable)
+
+
+
+def test_find_ffprobe_executable_prefers_sibling_of_ffmpeg(tmp_path, monkeypatch):
+    ffmpeg = tmp_path / ("ffmpeg.exe" if media_ffmpeg.os.name == "nt" else "ffmpeg")
+    ffprobe = tmp_path / ("ffprobe.exe" if media_ffmpeg.os.name == "nt" else "ffprobe")
+    ffmpeg.write_bytes(b"fake ffmpeg")
+    ffprobe.write_bytes(b"fake ffprobe")
+    monkeypatch.setattr(media_ffmpeg.shutil, "which", lambda _name: None)
+
+    assert media_ffmpeg.find_ffprobe_executable(ffmpeg_path=ffmpeg) == str(ffprobe.resolve())
+
+
+def test_probe_video_dimensions_parses_ffprobe_json(tmp_path, monkeypatch):
+    ffprobe = tmp_path / "ffprobe"
+    ffprobe.write_bytes(b"fake")
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command, 0, stdout='{"streams":[{"width":1280,"height":720}]}', stderr=""
+        )
+
+    monkeypatch.setattr(media_ffmpeg.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        media_ffmpeg,
+        "find_ffprobe_executable",
+        lambda _path=None, ffmpeg_path=None: str(ffprobe),
+    )
+
+    assert media_ffmpeg.probe_video_dimensions(source) == (1280, 720)
+    assert captured["command"][captured["command"].index("-select_streams") + 1] == "v:0"
+
+
+def test_probe_video_dimensions_rejects_invalid_metadata(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setattr(
+        media_ffmpeg,
+        "find_ffprobe_executable",
+        lambda _path=None, ffmpeg_path=None: "ffprobe",
+    )
+    monkeypatch.setattr(
+        media_ffmpeg.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout='{"streams":[{"width":0,"height":720}]}', stderr=""
+        ),
+    )
+
+    with pytest.raises(MediaToolError, match="解像度"):
+        media_ffmpeg.probe_video_dimensions(source)

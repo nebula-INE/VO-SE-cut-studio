@@ -277,3 +277,18 @@ def test_managed_asset_removal_deletes_only_file_inside_assets_kind(tmp_path):
     assert not resolved.exists()
     assert project_path.is_file()
     assert project.get_asset(asset.id) is None
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_asset_path_with_control_characters_is_rejected(tmp_path, managed):
+    project = ProjectDocument.create("Invalid Path")
+    project.save(tmp_path / "invalid-path.auralproj")
+    path = "assets/audio/bad\x00.wav" if managed else str(tmp_path / "bad\x00.wav")
+    payload = project.to_dict()
+    payload["assets"] = [{
+        "id": "bad", "name": "bad", "kind": "audio",
+        "path": path, "managed": managed,
+    }]
+
+    with pytest.raises(ProjectError, match="control characters"):
+        ProjectDocument.from_dict(payload, tmp_path / "invalid-path.auralproj")

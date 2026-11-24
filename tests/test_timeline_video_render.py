@@ -110,12 +110,6 @@ def test_render_timeline_video_uses_hd_canvas_for_still_only_projects(
     image_path.write_bytes(b"image")
     executable = tmp_path / "ffmpeg"
     executable.write_bytes(b"fake")
-    monkeypatch.setattr(
-        timeline_video_render,
-        "subprocess_run_unused",
-        None,
-        raising=False,
-    )
     captured = {}
 
     def fake_run(command, **kwargs):
@@ -217,3 +211,15 @@ def test_render_timeline_video_rejects_duration_shorter_than_clip(tmp_path):
             tmp_path / "short.mp4",
             duration_seconds=2.0,
         )
+
+
+
+def test_timeline_video_clips_reject_motion_track_payloads():
+    model = TimelineModel.create_default()
+    motion_track = next(track for track in model.tracks if track.kind == "motion")
+    model.add_clip(
+        motion_track.id, "motion", "body motion", 1.0, script_line_id="motion-1"
+    )
+
+    with pytest.raises(VideoRenderError, match="モーションクリップ"):
+        timeline_video_clips(model)

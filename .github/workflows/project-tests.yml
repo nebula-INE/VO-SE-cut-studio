@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main, feat/project-core-v1, feat/timeline-core-v1 ]
+    branches: [ main, feat/project-core-v1, feat/timeline-core-v1, feat/timeline-playback-v1 ]
 
 jobs:
   python-tests:

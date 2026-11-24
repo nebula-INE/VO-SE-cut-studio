@@ -434,6 +434,7 @@ class MainWindow(QMainWindow):
         self._active_timeline_video_clip_id = None
         self.preview_panel.close_video()
         self.timeline_panel.set_model(TimelineModel.create_default())
+        self.timeline_audio.prune_removed_clips()
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
         self._project.timeline = self.timeline_panel.model.to_dict()
@@ -484,6 +485,7 @@ class MainWindow(QMainWindow):
 
         self._active_timeline_video_clip_id = None
         self.timeline_panel.set_model(timeline_model)
+        self.timeline_audio.prune_removed_clips()
         self._project = project
         self._project_dirty = recovered
         if self._discard_pending:
@@ -595,6 +597,15 @@ class MainWindow(QMainWindow):
         self.timeline_audio.pause()
         self.timeline_panel.set_playback_state(False)
         self.timeline_panel.set_playhead(0.0)
+        if self.preview_panel.decoder is not None:
+            clip = self._video_clip_at(0.0)
+            active_asset_id = self._project.settings.get("active_video_asset_id")
+            if clip is not None and clip.asset_id == active_asset_id:
+                self._active_timeline_video_clip_id = clip.id
+                self.preview_panel.seek_to(clip.source_time_at(0.0))
+            else:
+                self._active_timeline_video_clip_id = None
+                self.preview_panel.seek_to(0.0)
 
     def _on_audio_timeline_position_changed(self, seconds: float) -> None:
         """Drive audio-only sections and bridge into video clips when encountered."""
@@ -870,6 +881,7 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_edited(self) -> None:
         self._mark_project_dirty()
+        self.timeline_audio.prune_removed_clips()
         clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
         if clip is None:
             self._active_timeline_video_clip_id = None

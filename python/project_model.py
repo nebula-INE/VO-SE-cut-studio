@@ -461,10 +461,12 @@ class ProjectDocument:
         """Resolve only paths inside the project's dedicated assets/<kind>/ tree."""
         if self.file_path is None:
             raise ProjectError("Cannot resolve managed assets before the project is saved")
-        if "\\" in asset.path:
-            raise ProjectError("Managed asset paths must use project-relative POSIX separators")
         relative = PurePosixPath(asset.path)
         windows_path = PureWindowsPath(asset.path)
+        if ".." in relative.parts or ".." in windows_path.parts:
+            raise ProjectError(f"Managed asset path contains traversal components: {asset.path}")
+        if "\\" in asset.path:
+            raise ProjectError("Managed asset paths must use project-relative POSIX separators")
         if relative.is_absolute() or windows_path.is_absolute() or windows_path.drive:
             raise ProjectError("Managed assets must use project-relative paths")
         parts = relative.parts
@@ -472,7 +474,7 @@ class ProjectDocument:
             len(parts) < 3
             or parts[0] != "assets"
             or parts[1] not in ASSET_KINDS
-            or any(part in {"", ".", ".."} for part in parts)
+            or any(part in {"", "."} for part in parts)
         ):
             raise ProjectError(
                 "Managed assets must be stored under assets/<kind>/ and cannot reference project files"

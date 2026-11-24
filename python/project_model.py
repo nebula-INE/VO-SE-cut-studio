@@ -76,6 +76,8 @@ class ProjectAsset:
             raise ProjectError(f"Invalid asset entry: {exc}") from exc
         if not asset.id or not asset.name or not asset.path:
             raise ProjectError("Asset id, name and path must not be empty")
+        if any(ord(character) < 32 or ord(character) == 127 for character in asset.path):
+            raise ProjectError("Asset path must not contain control characters")
         if asset.kind not in ASSET_KINDS:
             raise ProjectError(f"Unsupported asset kind: {asset.kind}")
         if not isinstance(data.get("managed", False), bool):
@@ -550,6 +552,6 @@ class ProjectDocument:
             try:
                 if not self.resolve_asset(asset).exists():
                     missing.append(asset)
-            except (OSError, ProjectError):
+            except (OSError, ValueError):
                 missing.append(asset)
         return missing

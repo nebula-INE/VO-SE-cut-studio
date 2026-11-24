@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -43,8 +44,8 @@ def timeline_video_clips(
 ) -> list[TimelineClip]:
     """Return visible, enabled video/image clips in track and timeline order.
 
-    Text, live character and motion clips are rejected rather than silently
-    omitted. They need their own deterministic rasterization/render pass.
+    Text clips are rasterized into timed transparent overlays. Live character
+    and motion clips are rejected rather than silently omitted.
     """
     selected: list[TimelineClip] = []
     unsupported: list[str] = []
@@ -72,9 +73,10 @@ def timeline_video_clips(
                 )
                 text = text if text is not None else clip.name
                 if not text.strip():
-                    unsupported.append(f"text: {clip.name or clip.id}")
-                else:
-                    selected.append(clip)
+                    raise VideoRenderError(
+                        f"字幕クリップ「{clip.name or clip.id}」に表示テキストがありません"
+                    )
+                selected.append(clip)
             elif clip.kind in {"video", "image"}:
                 if clip.asset_id is None:
                     raise VideoRenderError(
@@ -117,11 +119,11 @@ def render_timeline_video(
     still_image_canvas: tuple[int, int] = (1920, 1080),
     subtitle_texts: Mapping[str, str] | None = None,
 ) -> VideoRenderResult:
-    """Composite enabled timeline video and still-image clips into an MP4.
+    """Composite enabled video, still-image and subtitle clips into an MP4.
 
     Tracks are composited in model order; later tracks appear above earlier
-    tracks. Each source is fitted and centered on a black canvas. Video source
-    trims, timeline offsets, and clip durations are applied non-destructively.
+    tracks. Media is centered on a black canvas. Video source trims, subtitle
+    timings, timeline offsets and clip durations are applied non-destructively.
     """
     clips = timeline_video_clips(model, subtitle_texts)
     if not clips:
@@ -241,7 +243,6 @@ def render_timeline_video(
                     )
                 command.extend(["-i", str(source)])
     except Exception:
-        import shutil
         shutil.rmtree(subtitle_temp_dir, ignore_errors=True)
         raise
 
@@ -278,11 +279,15 @@ def render_timeline_video(
     filters.append(f"[{previous_label}]format=yuv420p[vout]")
     filter_graph = ";".join(filters)
 
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination.stem}.",
-        suffix=".tmp.mp4",
-        dir=str(destination.parent),
-    )
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.stem}.",
+            suffix=".tmp.mp4",
+            dir=str(destination.parent),
+        )
+    except OSError as exc:
+        shutil.rmtree(subtitle_temp_dir, ignore_errors=True)
+        raise VideoRenderError(f"一時MP4ファイルを作成できません: {exc}") from exc
     os.close(fd)
     temporary = Path(temporary_name)
     command.extend([

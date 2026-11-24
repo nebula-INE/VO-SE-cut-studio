@@ -237,3 +237,43 @@ def test_managed_asset_copy_rejects_assets_symlink_outside_project(tmp_path):
     with pytest.raises(ProjectError, match="escapes the project folder"):
         project.add_asset(source, "other", copy_into_project=True)
     assert list(outside_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("managed_path", ["safe.auralproj", "keep.txt", "../outside.txt"])
+def test_managed_asset_cannot_delete_project_or_arbitrary_file(tmp_path, managed_path):
+    project_path = tmp_path / "safe.auralproj"
+    project = ProjectDocument.create("Safe")
+    project.save(project_path)
+    keep = tmp_path / "keep.txt"
+    keep.write_text("keep me", encoding="utf-8")
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+
+    payload = project.to_dict()
+    payload["assets"] = [{
+        "id": "forged", "name": "forged", "kind": "other",
+        "path": managed_path, "managed": True,
+    }]
+    loaded = ProjectDocument.from_dict(payload, project_path)
+
+    with pytest.raises(ProjectError, match="assets/<kind>"):
+        loaded.remove_asset("forged", delete_managed_file=True)
+    assert project_path.is_file()
+    assert keep.read_text(encoding="utf-8") == "keep me"
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_managed_asset_removal_deletes_only_file_inside_assets_kind(tmp_path):
+    project = ProjectDocument.create("Delete Asset")
+    project_path = project.save(tmp_path / "delete.auralproj")
+    source = tmp_path / "music.wav"
+    source.write_bytes(b"managed-audio")
+    asset = project.add_asset(source, "audio", copy_into_project=True)
+    project.save()
+
+    resolved = project.resolve_asset(asset)
+    assert resolved.is_file()
+    assert project.remove_asset(asset.id, delete_managed_file=True)
+    assert not resolved.exists()
+    assert project_path.is_file()
+    assert project.get_asset(asset.id) is None

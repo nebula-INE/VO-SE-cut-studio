@@ -132,8 +132,12 @@ class VoseSynthesisThread(QThread):
                         # プレースホルダー音源にフォールバックする。
                         synthesize_text(vose_engine, line.text, str(wav_path))
 
+                if self._cancelled:
+                    break
                 self.line_ready.emit(line.line_id, str(wav_path))
             except Exception as e:  # noqa: BLE001 (1行失敗しても他行は続行する)
+                if self._cancelled:
+                    break
                 self.line_failed.emit(line.line_id, str(e))
 
         self.all_finished.emit()

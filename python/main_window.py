@@ -35,6 +35,7 @@ from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
 from timeline_model import TimelineError, TimelineModel
+from timeline_audio import TimelineAudioPlayback
 
 try:
     from osc_receiver import OscMocapReceiver
@@ -165,6 +166,15 @@ class MainWindow(QMainWindow):
         self.script_panel.asset_imported.connect(self._register_linked_asset)
 
         self.timeline_panel = TimelineEditorWidget(TimelineModel.create_default())
+        self.timeline_audio = TimelineAudioPlayback(
+            lambda: self.timeline_panel.model,
+            self._resolve_timeline_audio_asset,
+            self,
+        )
+        self.timeline_audio.position_changed.connect(self._on_audio_timeline_position_changed)
+        self.timeline_audio.error.connect(
+            lambda message: self.statusBar().showMessage(message, 8000)
+        )
         self._active_timeline_video_clip_id: str | None = None
         self._timeline_playback_requested = False
         self._timeline_playback_transition = False
@@ -540,11 +550,31 @@ class MainWindow(QMainWindow):
             return None
         return max(candidates, key=lambda clip: (clip.start, clip.id))
 
+    def _resolve_timeline_audio_asset(self, clip):
+        asset = self._project.get_asset(clip.asset_id or "")
+        if asset is None:
+            raise ProjectError(f"音声クリップ「{clip.name}」の素材参照がありません")
+        return self._project.resolve_asset(asset)
+
+    def _on_audio_timeline_position_changed(self, seconds: float) -> None:
+        """Advance the playhead while video is paused in a gap or after its end."""
+        if not self._timeline_playback_requested or self.preview_panel.is_playing:
+            return
+        self.timeline_panel.set_playhead(seconds)
+        duration = self.timeline_panel.model.duration_sec
+        if self._pending_timeline_clip_id is None and seconds >= duration:
+            self.timeline_panel.set_playhead(duration)
+            self._timeline_playback_requested = False
+            self.timeline_audio.pause()
+
     def _on_video_time_changed(self, source_seconds: float) -> None:
-        """Map source timestamps to the timeline and stop at the clip boundary."""
+        """Map video PTS to the timeline and synchronize the audio transport."""
         clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
         if clip is not None and clip.kind == "video":
-            self.timeline_panel.set_playhead(clip.timeline_time_at(source_seconds))
+            timeline_seconds = clip.timeline_time_at(source_seconds)
+            self.timeline_panel.set_playhead(timeline_seconds)
+            if self._timeline_playback_requested and self.timeline_audio.is_playing:
+                self.timeline_audio.sync_to_timeline(timeline_seconds)
             if (
                 self._timeline_playback_requested
                 and self.preview_panel.is_playing
@@ -555,13 +585,17 @@ class MainWindow(QMainWindow):
             self.timeline_panel.set_playhead(source_seconds)
 
     def _on_preview_playback_state_changed(self, playing: bool) -> None:
-        """Track user transport changes while ignoring internal clip transitions."""
+        """Track user transport changes and start/stop the timeline audio clock."""
         if self._timeline_playback_transition:
             return
         self._timeline_playback_requested = bool(playing)
         if not playing:
             self._timeline_playback_generation += 1
             self._pending_timeline_clip_id = None
+            self.timeline_audio.pause()
+            return
+        if self._active_timeline_video_clip_id is not None:
+            self.timeline_audio.start(self.timeline_panel.playhead_seconds)
 
     def _on_preview_playback_finished(self) -> None:
         """Continue to the next timeline clip when the current source reaches EOF."""
@@ -586,11 +620,14 @@ class MainWindow(QMainWindow):
             return
         next_clip = self.timeline_panel.model.next_clip_after(clip.id)
         self.timeline_panel.set_playhead(clip.end)
+        if self.timeline_audio.is_playing:
+            self.timeline_audio.sync_to_timeline(clip.end)
         self._timeline_playback_generation += 1
         generation = self._timeline_playback_generation
 
         if next_clip is None:
-            self._timeline_playback_requested = False
+            # Keep the timeline clock/audio running until the longest audio
+            # clip reaches the end of the complete timeline.
             self._pending_timeline_clip_id = None
             self._pause_preview_for_transition()
             return
@@ -670,9 +707,14 @@ class MainWindow(QMainWindow):
             if not opened:
                 self._timeline_playback_requested = False
                 self._pending_timeline_clip_id = None
+                self.timeline_audio.pause()
                 self.statusBar().showMessage(f"動画を開けませんでした: {path}", 6000)
                 return
             self._timeline_playback_requested = True
+            if self.timeline_audio.is_playing:
+                self.timeline_audio.sync_to_timeline(clip.start)
+            else:
+                self.timeline_audio.start(clip.start)
         except (OSError, ProjectError) as exc:
             self._timeline_playback_requested = False
             self.statusBar().showMessage(f"次の動画クリップを開けません: {exc}", 6000)
@@ -682,6 +724,8 @@ class MainWindow(QMainWindow):
         if not self._timeline_playback_transition:
             self._timeline_playback_generation += 1
             self._pending_timeline_clip_id = None
+        if self.timeline_audio.is_playing:
+            self.timeline_audio.sync_to_timeline(seconds)
         clip = self._video_clip_at(seconds)
         if clip is None or clip.asset_id is None:
             self._active_timeline_video_clip_id = None
@@ -746,6 +790,11 @@ class MainWindow(QMainWindow):
                 self._mark_project_dirty()
             self.timeline_panel.set_playhead(clip.start)
             self.preview_panel.seek_to(clip.source_in)
+            if self._timeline_playback_requested:
+                if self.timeline_audio.is_playing:
+                    self.timeline_audio.sync_to_timeline(clip.start)
+                else:
+                    self.timeline_audio.start(clip.start)
         except (OSError, ProjectError) as exc:
             QMessageBox.warning(self, "動画クリップを開けません", str(exc))
 
@@ -962,6 +1011,8 @@ class MainWindow(QMainWindow):
         self._project.settings["active_timeline_video_clip_id"] = clip.id
         self.timeline_panel.set_playhead(clip.start)
         self.preview_panel.seek_to(clip.source_in)
+        if self.preview_panel.is_playing:
+            self.timeline_audio.start(clip.start)
         self._mark_project_dirty()
 
     def _guess_asset_kind(self, path: str) -> str:
@@ -1118,6 +1169,7 @@ class MainWindow(QMainWindow):
             self._remove_autosave_file(self._project.autosave_path)
             self._discard_pending = False
         self._autosave_timer.stop()
+        self.timeline_audio.stop()
         self.preview_panel.cleanup()
         self.script_panel.cleanup()
         if self.mocap_bridge is not None:

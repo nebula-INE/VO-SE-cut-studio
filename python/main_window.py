@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self.preview_panel = PreviewPanel()
+        self.preview_panel.loop_playback = False
         self.setCentralWidget(self.preview_panel)
 
         self.script_panel = ScriptEditorPanel(_default_vose_lib_path())
@@ -165,10 +166,16 @@ class MainWindow(QMainWindow):
 
         self.timeline_panel = TimelineEditorWidget(TimelineModel.create_default())
         self._active_timeline_video_clip_id: str | None = None
+        self._timeline_playback_requested = False
+        self._timeline_playback_transition = False
+        self._timeline_playback_generation = 0
+        self._pending_timeline_clip_id: str | None = None
         self.timeline_panel.changed.connect(self._on_timeline_edited)
         self.timeline_panel.playhead_changed.connect(self._on_timeline_playhead_changed)
         self.timeline_panel.canvas.selection_changed.connect(self._on_timeline_selection_changed)
         self.preview_panel.current_time_changed.connect(self._on_video_time_changed)
+        self.preview_panel.playback_state_changed.connect(self._on_preview_playback_state_changed)
+        self.preview_panel.playback_finished.connect(self._on_preview_playback_finished)
         self.timeline_panel.add_clip_requested.connect(self.add_timeline_clip_from_assets)
         self.timeline_panel.add_track_requested.connect(self.add_timeline_track)
 
@@ -534,15 +541,136 @@ class MainWindow(QMainWindow):
         return max(candidates, key=lambda clip: (clip.start, clip.id))
 
     def _on_video_time_changed(self, source_seconds: float) -> None:
-        """Map source-media timestamps back to the selected clip's timeline time."""
+        """Map source timestamps to the timeline and stop at the clip boundary."""
         clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
         if clip is not None and clip.kind == "video":
             self.timeline_panel.set_playhead(clip.timeline_time_at(source_seconds))
+            if (
+                self._timeline_playback_requested
+                and self.preview_panel.is_playing
+                and source_seconds >= clip.source_out - 1e-6
+            ):
+                self._advance_timeline_video_clip(clip)
         else:
             self.timeline_panel.set_playhead(source_seconds)
 
+    def _on_preview_playback_state_changed(self, playing: bool) -> None:
+        """Track user transport changes while ignoring internal clip transitions."""
+        if self._timeline_playback_transition:
+            return
+        self._timeline_playback_requested = bool(playing)
+        if not playing:
+            self._timeline_playback_generation += 1
+            self._pending_timeline_clip_id = None
+
+    def _on_preview_playback_finished(self) -> None:
+        """Continue to the next timeline clip when the current source reaches EOF."""
+        if not self._timeline_playback_requested:
+            return
+        clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
+        if clip is None or clip.kind != "video":
+            self._timeline_playback_requested = False
+            return
+        self._advance_timeline_video_clip(clip)
+
+    def _pause_preview_for_transition(self) -> None:
+        self._timeline_playback_transition = True
+        try:
+            self.preview_panel.pause_playback()
+        finally:
+            self._timeline_playback_transition = False
+
+    def _advance_timeline_video_clip(self, clip) -> None:
+        """Advance after a video segment, preserving intentional timeline gaps."""
+        if not self._timeline_playback_requested or self._pending_timeline_clip_id is not None:
+            return
+        next_clip = self.timeline_panel.model.next_clip_after(clip.id)
+        self.timeline_panel.set_playhead(clip.end)
+        self._timeline_playback_generation += 1
+        generation = self._timeline_playback_generation
+
+        if next_clip is None:
+            self._timeline_playback_requested = False
+            self._pending_timeline_clip_id = None
+            self._pause_preview_for_transition()
+            return
+
+        self._pending_timeline_clip_id = next_clip.id
+        self._pause_preview_for_transition()
+        gap_seconds = max(0.0, next_clip.start - clip.end)
+        if gap_seconds > 1e-4:
+            QTimer.singleShot(
+                max(1, int(round(gap_seconds * 1000.0))),
+                lambda clip_id=next_clip.id, token=generation: self._start_timeline_video_clip(
+                    clip_id, token
+                ),
+            )
+        else:
+            self._start_timeline_video_clip(next_clip.id, generation)
+
+    def _start_timeline_video_clip(self, clip_id: str, generation: int) -> None:
+        """Open/seek the next clip and resume playback if the transition is current."""
+        if (
+            generation != self._timeline_playback_generation
+            or not self._timeline_playback_requested
+            or self._pending_timeline_clip_id not in (None, clip_id)
+        ):
+            return
+        clip = self.timeline_panel.model.get_clip(clip_id)
+        if clip is None or clip.kind != "video" or clip.asset_id is None:
+            self._timeline_playback_requested = False
+            self._pending_timeline_clip_id = None
+            return
+        asset = self._project.get_asset(clip.asset_id)
+        if asset is None:
+            self.statusBar().showMessage("次の動画クリップの素材が見つかりません", 5000)
+            self._timeline_playback_requested = False
+            self._pending_timeline_clip_id = None
+            return
+        try:
+            path = self._project.resolve_asset(asset)
+            if not path.is_file():
+                self.statusBar().showMessage(f"動画素材が見つかりません: {path}", 6000)
+                self._timeline_playback_requested = False
+                self._pending_timeline_clip_id = None
+                return
+            previous_asset_id = self._project.settings.get("active_video_asset_id")
+            changed = (
+                self._project.settings.get("active_timeline_video_clip_id") != clip.id
+                or previous_asset_id != asset.id
+            )
+            self._active_timeline_video_clip_id = clip.id
+            self._pending_timeline_clip_id = None
+            self._project.settings["active_timeline_video_clip_id"] = clip.id
+            self._project.settings["active_video_asset_id"] = asset.id
+            self.timeline_panel.set_playhead(clip.start)
+            if changed:
+                self._mark_project_dirty()
+
+            self._timeline_playback_transition = True
+            try:
+                if self.preview_panel.decoder is None or previous_asset_id != asset.id:
+                    opened = self.preview_panel.open_video(str(path))
+                else:
+                    opened = self.preview_panel.seek_to(clip.source_in)
+                    if opened:
+                        self.preview_panel.resume_playback()
+            finally:
+                self._timeline_playback_transition = False
+            if not opened:
+                self._timeline_playback_requested = False
+                self.statusBar().showMessage(f"動画を開けませんでした: {path}", 6000)
+                return
+            self._timeline_playback_requested = True
+        except (OSError, ProjectError) as exc:
+            self._timeline_playback_requested = False
+            self.statusBar().showMessage(f"次の動画クリップを開けません: {exc}", 6000)
+
     def _on_timeline_playhead_changed(self, seconds: float) -> None:
         """Seek source media using the clip mapping at the requested timeline time."""
+        if not self._timeline_playback_transition:
+            self._timeline_playback_generation += 1
+            self._pending_timeline_clip_id = None
         clip = self._video_clip_at(seconds)
         if clip is None or clip.asset_id is None:
             self._active_timeline_video_clip_id = None
@@ -577,6 +705,9 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_selection_changed(self, clip_id: str) -> None:
         """Selecting a video clip loads its source and jumps to its timeline start."""
+        if not self._timeline_playback_transition:
+            self._timeline_playback_generation += 1
+            self._pending_timeline_clip_id = None
         if not clip_id:
             return
         clip = self.timeline_panel.model.get_clip(clip_id)

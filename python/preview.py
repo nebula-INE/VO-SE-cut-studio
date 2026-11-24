@@ -243,12 +243,17 @@ class PreviewPanel(QWidget):
     """
 
     current_time_changed = Signal(float)
+    playback_finished = Signal()
+    playback_state_changed = Signal(bool)
 
     def __init__(self, video_path: str | None = None) -> None:
         super().__init__()
 
         self.decoder: aural_engine.VideoDecoder | None = None
         self.is_playing = False
+        # Standalone preview keeps its historical loop behavior. Timeline
+        # playback disables looping and advances between timeline clips.
+        self.loop_playback = True
 
         self.preview = VideoPreviewWidget()
         self.play_button = QPushButton("Pause")
@@ -287,6 +292,7 @@ class PreviewPanel(QWidget):
         self.timer.start()
         self.is_playing = True
         self.play_button.setText("Pause")
+        self.playback_state_changed.emit(True)
         return True
 
     def close_video(self) -> None:
@@ -297,6 +303,8 @@ class PreviewPanel(QWidget):
             self.decoder = None
         self.is_playing = False
         self.play_button.setEnabled(False)
+        self.play_button.setText("Play")
+        self.playback_state_changed.emit(False)
         self.current_time_changed.emit(0.0)
 
     def seek_to(self, seconds: float) -> bool:
@@ -332,7 +340,13 @@ class PreviewPanel(QWidget):
 
         result = self.decoder.decode_next_frame()
         if result is None:
-            # 終端に達したら先頭へシークしてループ再生
+            if not self.loop_playback:
+                self.timer.stop()
+                self.is_playing = False
+                self.play_button.setText("Play")
+                self.playback_finished.emit()
+                return
+            # Standalone preview retains its historical loop behavior.
             self.decoder.seek(0.0)
             result = self.decoder.decode_next_frame()
             if result is None:
@@ -342,16 +356,29 @@ class PreviewPanel(QWidget):
         self.preview.show_frame(frame)
         self.current_time_changed.emit(float(pts_seconds))
 
+    def pause_playback(self) -> None:
+        if self.decoder is None or not self.is_playing:
+            return
+        self.timer.stop()
+        self.is_playing = False
+        self.play_button.setText("Play")
+        self.playback_state_changed.emit(False)
+
+    def resume_playback(self) -> None:
+        if self.decoder is None or self.is_playing:
+            return
+        self.timer.start()
+        self.is_playing = True
+        self.play_button.setText("Pause")
+        self.playback_state_changed.emit(True)
+
     def toggle_playback(self) -> None:
         if self.decoder is None:
             return
         if self.is_playing:
-            self.timer.stop()
-            self.play_button.setText("Play")
+            self.pause_playback()
         else:
-            self.timer.start()
-            self.play_button.setText("Pause")
-        self.is_playing = not self.is_playing
+            self.resume_playback()
 
     def set_telop(self, text: str) -> None:
         """台本エディタ側から現在のセリフのテキストを受け取り、

@@ -160,3 +160,32 @@ def test_clip_converts_between_timeline_and_source_positions_with_clamping():
     assert clip.timeline_time_at(4.5) == 5.0
     assert clip.timeline_time_at(0.0) == 2.0
     assert clip.timeline_time_at(999.0) == clip.end
+
+
+def test_next_clip_after_returns_next_enabled_clip_on_same_track_across_gap():
+    model, track, current = _model_with_clip()
+    disabled = model.add_clip(
+        track.id, "video", "disabled.mov", 2.0, start=current.end, asset_id="disabled"
+    )
+    disabled.enabled = False
+    overlapping = model.add_clip(
+        track.id, "video", "overlap.mov", 2.0, start=current.end - 0.5, asset_id="overlap"
+    )
+    later_track = model.add_track("Video 2", "video")
+    model.add_clip(
+        later_track.id, "video", "other-track.mov", 2.0, start=current.end, asset_id="other"
+    )
+    next_clip = model.add_clip(
+        track.id, "video", "next.mov", 2.0, start=current.end + 1.25, asset_id="next"
+    )
+
+    assert model.next_clip_after(current.id) is next_clip
+    assert model.next_clip_after(disabled.id) is None
+    assert model.next_clip_after(overlapping.id) is None
+
+
+def test_next_clip_after_returns_none_for_unknown_or_final_clip():
+    model, _, clip = _model_with_clip()
+
+    assert model.next_clip_after("missing") is None
+    assert model.next_clip_after(clip.id) is None

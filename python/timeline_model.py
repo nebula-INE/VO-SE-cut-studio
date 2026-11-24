@@ -245,6 +245,21 @@ class TimelineModel:
             key=lambda clip: (clip.start, clip.id),
         )
 
+    def next_clip_after(self, clip_id: str) -> TimelineClip | None:
+        """Return the next enabled clip on the same track without crossing overlaps."""
+        current = self.get_clip(clip_id)
+        if current is None:
+            return None
+        candidates = (
+            clip for clip in self.clips
+            if clip.id != current.id
+            and clip.track_id == current.track_id
+            and clip.kind == current.kind
+            and clip.enabled
+            and clip.start >= current.end - 1e-6
+        )
+        return min(candidates, key=lambda clip: (clip.start, clip.id), default=None)
+
     def add_track(self, name: str, kind: str) -> TimelineTrack:
         if kind not in TRACK_KINDS:
             raise TimelineError(f"Unsupported timeline track kind: {kind}")

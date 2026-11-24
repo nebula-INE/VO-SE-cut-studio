@@ -322,6 +322,46 @@ class TimelineModel:
         self.clips.append(clip)
         return clip
 
+    def upsert_voice_clip(
+        self,
+        preferred_track_id: str,
+        name: str,
+        duration: float,
+        *,
+        start: float,
+        asset_id: str,
+        script_line_id: str,
+    ) -> tuple[TimelineClip, bool]:
+        """Create a generated voice clip, but never overwrite an existing edit.
+
+        A valid generated clip may have been moved, trimmed, or renamed by the
+        user. Reopening/reconciling the script must preserve that timeline edit.
+        Only its source asset reference is refreshed if the cached WAV changed.
+        """
+        existing = next(
+            (
+                clip for clip in self.clips
+                if clip.kind == "voice" and clip.script_line_id == script_line_id
+            ),
+            None,
+        )
+        if existing is not None:
+            changed = existing.asset_id != asset_id
+            if changed:
+                existing.asset_id = asset_id
+            return existing, changed
+
+        created = self.add_clip(
+            preferred_track_id,
+            "voice",
+            name,
+            duration,
+            start=start,
+            asset_id=asset_id,
+            script_line_id=script_line_id,
+        )
+        return created, True
+
     @staticmethod
     def _snap(value: float, snap_seconds: float | None) -> float:
         if snap_seconds is None or snap_seconds <= 0:

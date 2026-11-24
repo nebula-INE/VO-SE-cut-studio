@@ -341,6 +341,8 @@ class ScriptEditorPanel(QWidget):
         # --- VO-SE音声合成まわりの状態 ---
         self._vose_lib_path = vose_lib_path
         self._synth_thread = None
+        self._synthesis_generation = 0
+        self._retired_synth_threads = []
         self._synth_wav_paths: dict[str, str] = {}   # line_id -> wavファイルパス
         self._synth_envelopes: dict[str, list] = {}  # line_id -> LipSyncFrameのリスト
         self._playback_queue: list[str] = []          # 再生待ちのline_idキュー
@@ -521,10 +523,13 @@ class ScriptEditorPanel(QWidget):
         if self._synth_thread is not None:
             return  # 既に合成中
 
+        self._synthesis_generation += 1
+        generation = self._synthesis_generation
         self.synth_button.setEnabled(False)
         self.synth_status_label.setText("合成中... (0/{})".format(len(self.model.lines)))
 
         self._synth_wav_paths.clear()
+        self._synth_envelopes.clear()
         self._playback_queue.clear()
         self._synth_pending_count = len(self.model.lines)
         for line in self.model.lines:
@@ -538,10 +543,67 @@ class ScriptEditorPanel(QWidget):
         self._synth_thread = start_synthesis(
             self._vose_lib_path,
             lines,
-            on_line_ready=self._on_synth_line_ready,
-            on_line_failed=self._on_synth_line_failed,
-            on_all_finished=self._on_synth_all_finished,
+            on_line_ready=lambda line_id, path: self._on_synth_line_ready_for_generation(
+                generation, line_id, path
+            ),
+            on_line_failed=lambda line_id, error: self._on_synth_line_failed_for_generation(
+                generation, line_id, error
+            ),
+            on_all_finished=lambda: self._on_synth_all_finished_for_generation(generation),
         )
+
+    def _on_synth_line_ready_for_generation(
+        self, generation: int, line_id: str, wav_path: str
+    ) -> None:
+        if generation != self._synthesis_generation:
+            return
+        self._on_synth_line_ready(line_id, wav_path)
+
+    def _on_synth_line_failed_for_generation(
+        self, generation: int, line_id: str, error_message: str
+    ) -> None:
+        if generation != self._synthesis_generation:
+            return
+        self._on_synth_line_failed(line_id, error_message)
+
+    def _on_synth_all_finished_for_generation(self, generation: int) -> None:
+        if generation != self._synthesis_generation:
+            return
+        self._on_synth_all_finished()
+
+    def _release_retired_synth_thread(self, thread) -> None:
+        if thread in self._retired_synth_threads:
+            self._retired_synth_threads.remove(thread)
+            thread.deleteLater()
+
+    def cancel_synthesis(self) -> None:
+        """Invalidate callbacks and request cancellation of the current worker.
+
+        Synthesis functions are not forcibly interrupted mid-WAV. The worker is
+        retained until its QThread.finished signal so replacing a project never
+        destroys a running QThread or allows stale callbacks into the new script.
+        """
+        self._synthesis_generation += 1
+        thread = self._synth_thread
+        if thread is not None:
+            self._synth_thread = None
+            thread.cancel()
+            self._retired_synth_threads.append(thread)
+            thread.finished.connect(
+                lambda worker=thread: self._release_retired_synth_thread(worker)
+            )
+
+        self.media_player.stop()
+        self._synth_wav_paths.clear()
+        self._synth_envelopes.clear()
+        self._playback_queue.clear()
+        self._synth_pending_count = 0
+        self._current_playing_line_id = None
+        self.synth_status_label.setText("")
+        self.synth_button.setEnabled(_VOSE_AVAILABLE)
+        self.telop_changed.emit("")
+        self.mouth_openness_changed.emit(0.0)
+        self.vowels_changed.emit({})
 
     def _on_synth_line_ready(self, line_id: str, wav_path: str) -> None:
         self._synth_wav_paths[line_id] = wav_path
@@ -703,16 +765,18 @@ class ScriptEditorPanel(QWidget):
         プロジェクトファイルからの読み込みにも使うため、ファイル選択UIは
         呼び出し元に任せる。読込自体ではcontent_changedを発火しない。
         """
-        self.stop_preview_playback()
-        self.media_player.stop()
         try:
             if not isinstance(data, dict):
                 raise ValueError("台本データはJSONオブジェクトである必要があります")
-            self.model = ScriptModel.from_dict(data)
+            new_model = ScriptModel.from_dict(data)
         except Exception as e:  # noqa: BLE001 (UIへのエラー表示が目的)
             QMessageBox.critical(self, "読み込みエラー", str(e))
             return False
 
+        self.stop_preview_playback()
+        self.cancel_synthesis()
+        self.media_player.stop()
+        self.model = new_model
         self.transcript.clear()
         self.transcript.model = self.model
         for line in self.model.lines:
@@ -738,10 +802,10 @@ class ScriptEditorPanel(QWidget):
         """ウィンドウが閉じられる際に呼び出す。"""
         self.playback_timer.stop()
         self.media_player.stop()
-        if self._synth_thread is not None:
-            self._synth_thread.cancel()
-            self._synth_thread.quit()
-            self._synth_thread.wait(3000)
+        self.cancel_synthesis()
+        for thread in list(self._retired_synth_threads):
+            thread.wait()
+        self._retired_synth_threads.clear()
 
 
 class ScriptEditorWindow(QMainWindow):

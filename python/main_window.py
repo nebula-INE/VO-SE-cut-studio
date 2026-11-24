@@ -917,26 +917,46 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"タイムラインに追加しました: {asset.name}", 5000)
 
     def _add_video_asset_to_timeline(self, asset) -> None:
-        if any(clip.asset_id == asset.id for clip in self.timeline_panel.model.clips):
-            return
-        tracks = [
-            track for track in self.timeline_panel.model.tracks
-            if track.kind == "video" and not track.locked
-        ]
-        if not tracks:
-            tracks = [self.timeline_panel.model.add_track("Video 1", "video")]
-        duration = self._asset_default_duration(asset)
-        try:
-            self.timeline_panel.add_clip(
-                tracks[0].id,
-                "video",
-                asset.name,
-                duration,
-                start=0.0,
-                asset_id=asset.id,
-            )
-        except TimelineError as exc:
-            QMessageBox.warning(self, "タイムライン追加エラー", str(exc))
+        existing = sorted(
+            (
+                clip for clip in self.timeline_panel.model.clips
+                if clip.kind == "video" and clip.asset_id == asset.id
+            ),
+            key=lambda clip: (clip.start, clip.id),
+        )
+        if existing:
+            clip = existing[0]
+            self.timeline_panel.canvas._set_selected_clip(clip.id)
+        else:
+            tracks = [
+                track for track in self.timeline_panel.model.tracks
+                if track.kind == "video" and not track.locked
+            ]
+            if not tracks:
+                tracks = [self.timeline_panel.model.add_track("Video 1", "video")]
+            duration = self._asset_default_duration(asset)
+            try:
+                clip = self.timeline_panel.add_clip(
+                    tracks[0].id,
+                    "video",
+                    asset.name,
+                    duration,
+                    start=0.0,
+                    asset_id=asset.id,
+                )
+            except TimelineError as exc:
+                QMessageBox.warning(self, "タイムライン追加エラー", str(exc))
+                return
+
+        # A video opened from the File menu/startup is also an active timeline
+        # clip. Record the mapping explicitly so playback stops/advances at its
+        # clip boundary instead of treating source PTS as timeline time.
+        self._active_timeline_video_clip_id = clip.id
+        self._project.settings["active_video_asset_id"] = asset.id
+        self._project.settings["active_timeline_video_clip_id"] = clip.id
+        self.timeline_panel.set_playhead(clip.start)
+        self.preview_panel.seek_to(clip.source_in)
+        self._mark_project_dirty()
 
     def _guess_asset_kind(self, path: str) -> str:
         extension = Path(path).suffix.lower()

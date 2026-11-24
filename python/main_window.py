@@ -650,6 +650,14 @@ class MainWindow(QMainWindow):
         else:
             self._start_timeline_video_clip(next_clip.id, generation)
 
+    def _abort_timeline_video_transition(self, message: str | None = None) -> None:
+        """Stop the complete timeline transport after a failed video transition."""
+        self._timeline_playback_requested = False
+        self._pending_timeline_clip_id = None
+        self.timeline_audio.pause()
+        if message:
+            self.statusBar().showMessage(message, 6000)
+
     def _start_timeline_video_clip(self, clip_id: str, generation: int) -> None:
         """Open/seek the next clip and resume playback if the transition is current."""
         if (
@@ -660,21 +668,16 @@ class MainWindow(QMainWindow):
             return
         clip = self.timeline_panel.model.get_clip(clip_id)
         if clip is None or clip.kind != "video" or clip.asset_id is None:
-            self._timeline_playback_requested = False
-            self._pending_timeline_clip_id = None
+            self._abort_timeline_video_transition()
             return
         asset = self._project.get_asset(clip.asset_id)
         if asset is None:
-            self.statusBar().showMessage("次の動画クリップの素材が見つかりません", 5000)
-            self._timeline_playback_requested = False
-            self._pending_timeline_clip_id = None
+            self._abort_timeline_video_transition("次の動画クリップの素材が見つかりません")
             return
         try:
             path = self._project.resolve_asset(asset)
             if not path.is_file():
-                self.statusBar().showMessage(f"動画素材が見つかりません: {path}", 6000)
-                self._timeline_playback_requested = False
-                self._pending_timeline_clip_id = None
+                self._abort_timeline_video_transition(f"動画素材が見つかりません: {path}")
                 return
             previous_asset_id = self._project.settings.get("active_video_asset_id")
             changed = (
@@ -710,10 +713,7 @@ class MainWindow(QMainWindow):
             finally:
                 self._timeline_playback_transition = False
             if not opened:
-                self._timeline_playback_requested = False
-                self._pending_timeline_clip_id = None
-                self.timeline_audio.pause()
-                self.statusBar().showMessage(f"動画を開けませんでした: {path}", 6000)
+                self._abort_timeline_video_transition(f"動画を開けませんでした: {path}")
                 return
             self._timeline_playback_requested = True
             if self.timeline_audio.is_playing:
@@ -721,8 +721,7 @@ class MainWindow(QMainWindow):
             else:
                 self.timeline_audio.start(clip.start)
         except (OSError, ProjectError) as exc:
-            self._timeline_playback_requested = False
-            self.statusBar().showMessage(f"次の動画クリップを開けません: {exc}", 6000)
+            self._abort_timeline_video_transition(f"次の動画クリップを開けません: {exc}")
 
     def _on_timeline_playhead_changed(self, seconds: float) -> None:
         """Seek source media using the clip mapping at the requested timeline time."""

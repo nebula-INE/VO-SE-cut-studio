@@ -333,6 +333,7 @@ def render_timeline_video(
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+        shutil.rmtree(subtitle_temp_dir, ignore_errors=True)
 
     return VideoRenderResult(
         output_path=destination,

@@ -527,6 +527,8 @@ class MainWindow(QMainWindow):
                         self.timeline_panel.canvas._set_selected_clip(active_clip.id)
                         self.timeline_panel.set_playhead(active_clip.start)
                         self.preview_panel.seek_to(active_clip.source_in)
+                        if self.preview_panel.is_playing and self._timeline_playback_requested:
+                            self.timeline_audio.start(active_clip.start)
             except (OSError, ProjectError):
                 pass
 

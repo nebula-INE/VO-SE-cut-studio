@@ -242,7 +242,7 @@ class MainWindow(QMainWindow):
         save_script_action = file_menu.addAction("台本を保存...")
         save_script_action.triggered.connect(self.script_panel.save_script)
         open_script_action = file_menu.addAction("台本を開く...")
-        open_script_action.triggered.connect(self.script_panel.load_script)
+        open_script_action.triggered.connect(self.open_script)
 
         view_menu = menu_bar.addMenu("表示")
         toggle_script_action = self.script_dock.toggleViewAction()
@@ -350,6 +350,22 @@ class MainWindow(QMainWindow):
             self._discard_pending = True
             return True
         return False
+
+    def open_script(self) -> None:
+        """Load a standalone script without bypassing the project's dirty-state guard."""
+        previous_autosave = self._project.autosave_path
+        if not self._confirm_discard_changes():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "台本を開く", "", "JSON (*.json)")
+        if not path:
+            self._discard_pending = False
+            return
+        if not self.script_panel.load_script_from_path(path):
+            self._discard_pending = False
+            return
+        if self._discard_pending:
+            self._remove_autosave_file(previous_autosave)
+        self._discard_pending = False
 
     def new_project(self) -> None:
         previous_autosave = self._project.autosave_path

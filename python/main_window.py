@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
         self._project_dirty = False
+        self._discard_pending = False
         self.script_panel.content_changed.connect(self._mark_project_dirty)
         self.script_panel.asset_imported.connect(self._register_linked_asset)
 
@@ -320,7 +321,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"保存しました: {saved_path}", 5000)
         return True
 
+    @staticmethod
+    def _remove_autosave_file(path: Path | None) -> None:
+        if path is not None and path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
     def _confirm_discard_changes(self) -> bool:
+        self._discard_pending = False
         if not self._project_dirty:
             return True
         choice = QMessageBox.question(
@@ -335,29 +345,32 @@ class MainWindow(QMainWindow):
         if choice == QMessageBox.StandardButton.Save:
             return self.save_project()
         if choice == QMessageBox.StandardButton.Discard:
-            self._project_dirty = False
-            autosave = self._project.autosave_path
-            if autosave and autosave.exists():
-                try:
-                    autosave.unlink()
-                except OSError:
-                    pass
-            self._refresh_window_title()
+            # Do not clear the dirty flag or remove autosave until the requested
+            # replacement succeeds. The file picker may still be cancelled.
+            self._discard_pending = True
             return True
         return False
 
     def new_project(self) -> None:
+        previous_autosave = self._project.autosave_path
         if not self._confirm_discard_changes():
             return
-        self.script_panel.load_script_data(ScriptModel().to_dict())
+        if not self.script_panel.load_script_data(ScriptModel().to_dict()):
+            self._discard_pending = False
+            return
         self.preview_panel.close_video()
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
+        if self._discard_pending:
+            self._remove_autosave_file(previous_autosave)
+        self._discard_pending = False
         self._project_dirty = False
         self._refresh_window_title()
         self.statusBar().showMessage("新しいプロジェクトを作成しました", 4000)
 
     def open_project(self) -> None:
+        previous_project_path = self._project.file_path
+        previous_autosave = self._project.autosave_path
         if not self._confirm_discard_changes():
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -367,6 +380,7 @@ class MainWindow(QMainWindow):
             "プロジェクト/台本 (*.auralproj *.json);;aural Studio プロジェクト (*.auralproj);;台本 JSON (*.json)",
         )
         if not path:
+            self._discard_pending = False
             return
         try:
             project, recovered = ProjectDocument.load_with_recovery(path)
@@ -382,13 +396,24 @@ class MainWindow(QMainWindow):
                     project = ProjectDocument.load(path)
                     recovered = False
         except (OSError, ProjectError) as exc:
+            self._discard_pending = False
             QMessageBox.critical(self, "プロジェクト読み込みエラー", str(exc))
             return
 
         if not self.script_panel.load_script_data(project.script):
+            self._discard_pending = False
             return
+
         self._project = project
         self._project_dirty = recovered
+        if self._discard_pending:
+            # Keep a recovered autosave when reopening that exact project; it is
+            # the only copy of changes the user explicitly chose to recover.
+            if previous_autosave and (
+                previous_project_path != project.file_path or not recovered
+            ):
+                self._remove_autosave_file(previous_autosave)
+        self._discard_pending = False
         self._refresh_window_title()
         self.preview_panel.close_video()
 
@@ -562,6 +587,9 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard_changes():
             event.ignore()
             return
+        if self._discard_pending:
+            self._remove_autosave_file(self._project.autosave_path)
+            self._discard_pending = False
         self._autosave_timer.stop()
         self.preview_panel.cleanup()
         self.script_panel.cleanup()

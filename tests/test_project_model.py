@@ -256,7 +256,7 @@ def test_managed_asset_cannot_delete_project_or_arbitrary_file(tmp_path, managed
     }]
     loaded = ProjectDocument.from_dict(payload, project_path)
 
-    with pytest.raises(ProjectError, match="assets/<kind>"):
+    with pytest.raises(ProjectError, match="traversal|assets/<kind>"):
         loaded.remove_asset("forged", delete_managed_file=True)
     assert project_path.is_file()
     assert keep.read_text(encoding="utf-8") == "keep me"

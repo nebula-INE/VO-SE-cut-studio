@@ -150,21 +150,24 @@ class TimelineAudioPlayback(QObject):
         self._players[clip.id] = entry
         return entry
 
+    def prune_removed_clips(self) -> None:
+        """Release media players immediately when their timeline clips are removed."""
+        known_ids = {clip.id for clip in self._model_provider().clips}
+        for clip_id in tuple(self._players):
+            if clip_id in known_ids:
+                continue
+            entry = self._players.pop(clip_id)
+            entry.player.stop()
+            entry.player.setSource(QUrl())
+            entry.player.deleteLater()
+            entry.output.deleteLater()
+            self._failed_clips.discard(clip_id)
+
     def _sync_players(self, timeline_seconds: float) -> None:
+        self.prune_removed_clips()
         model = self._model_provider()
         active = active_audio_clips(model, timeline_seconds)
         active_ids = {clip.id for clip, _track in active}
-        known_ids = {clip.id for clip in model.clips}
-
-        # Drop players for clips that were deleted from the current project.
-        for clip_id in tuple(self._players):
-            if clip_id not in known_ids:
-                entry = self._players.pop(clip_id)
-                entry.player.stop()
-                entry.player.setSource(QUrl())
-                entry.player.deleteLater()
-                entry.output.deleteLater()
-                self._failed_clips.discard(clip_id)
 
         for clip, track in active:
             if clip.id in self._failed_clips:

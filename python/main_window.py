@@ -160,10 +160,13 @@ class MainWindow(QMainWindow):
         self.script_panel = ScriptEditorPanel(_default_vose_lib_path())
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
+        self._pending_generated_audio: dict[str, tuple[str, str]] = {}
         self._project_dirty = False
         self._discard_pending = False
         self.script_panel.content_changed.connect(self._mark_project_dirty)
         self.script_panel.asset_imported.connect(self._register_linked_asset)
+        self.script_panel.synth_audio_ready.connect(self._on_synth_audio_ready)
+        self.script_panel.synth_audio_batch_finished.connect(self._persist_pending_generated_audio)
 
         self.timeline_panel = TimelineEditorWidget(TimelineModel.create_default())
         self.timeline_audio = TimelineAudioPlayback(
@@ -340,6 +343,225 @@ class MainWindow(QMainWindow):
         self._project.script = self.script_panel.model.to_dict()
         self._project.timeline = self.timeline_panel.model.to_dict()
 
+    def _on_synth_audio_ready(self, line_id: str, wav_path: str) -> None:
+        fingerprint = self.script_panel.synthesis_fingerprint(line_id)
+        if fingerprint:
+            self._pending_generated_audio[line_id] = (wav_path, fingerprint)
+
+    def _persist_pending_generated_audio(self) -> bool:
+        """Copy completed synthesis WAVs into the saved project's managed assets."""
+        if self._project.file_path is None or not self._pending_generated_audio:
+            return False
+
+        records = self._project.settings.get("generated_audio_assets")
+        if not isinstance(records, dict):
+            records = {}
+        self._project.settings["generated_audio_assets"] = records
+        completed: list[str] = []
+        changed = False
+
+        for line_id, (source_name, fingerprint) in tuple(self._pending_generated_audio.items()):
+            if self.script_panel.synthesis_fingerprint(line_id) != fingerprint:
+                completed.append(line_id)
+                continue
+            source_path = Path(source_name).expanduser()
+            if not source_path.is_file():
+                self.statusBar().showMessage(
+                    f"生成音声ファイルが見つかりません: {source_path}", 8000
+                )
+                continue
+
+            record = records.get(line_id)
+            asset = None
+            if isinstance(record, dict) and record.get("fingerprint") == fingerprint:
+                asset_id = record.get("asset_id")
+                if isinstance(asset_id, str):
+                    asset = self._project.get_asset(asset_id)
+                    if asset is not None:
+                        try:
+                            if not self._project.resolve_asset(asset).is_file():
+                                asset = None
+                        except (OSError, ProjectError, ValueError):
+                            asset = None
+
+            created_asset = False
+            try:
+                if asset is None:
+                    asset = self._project.add_asset(
+                        source_path, "audio", copy_into_project=True
+                    )
+                    created_asset = True
+                stored_path = self._project.resolve_asset(asset)
+                if not self.script_panel.set_persisted_synth_audio(
+                    line_id, str(stored_path), fingerprint
+                ):
+                    if created_asset:
+                        self._project.remove_asset(asset.id, delete_managed_file=True)
+                    continue
+                records[line_id] = {
+                    "asset_id": asset.id,
+                    "fingerprint": fingerprint,
+                }
+                changed = True
+                completed.append(line_id)
+            except (OSError, ProjectError, ValueError) as exc:
+                self.statusBar().showMessage(
+                    f"生成音声をプロジェクトに保存できませんでした: {exc}", 8000
+                )
+
+        timeline_changed = self._sync_generated_voice_timeline()
+        changed = changed or timeline_changed
+        if changed or completed:
+            try:
+                self._sync_project_script()
+                self._project.save()
+            except (OSError, ProjectError) as exc:
+                self._project_dirty = True
+                self.statusBar().showMessage(
+                    f"生成音声のプロジェクト保存に失敗しました: {exc}", 8000
+                )
+                return False
+            for line_id in completed:
+                self._pending_generated_audio.pop(line_id, None)
+            self._project_dirty = False
+            self._refresh_window_title()
+            if changed:
+                self.statusBar().showMessage(
+                    f"生成音声をプロジェクトに保存しました ({len(completed)}行)", 6000
+                )
+        return changed or bool(completed)
+
+    def _sync_generated_voice_timeline(self) -> bool:
+        """Place valid generated narration WAVs on one dedicated Voice track."""
+        model = self.timeline_panel.model
+        valid_lines = [
+            line for line in self.script_panel.model.lines
+            if line.line_id in self.script_panel._synth_wav_paths
+            and self.script_panel._synth_input_fingerprints.get(line.line_id)
+            == self.script_panel.synthesis_fingerprint(line.line_id)
+        ]
+        valid_ids = {line.line_id for line in valid_lines}
+        changed = False
+
+        # Never leave an outdated narration clip playable after the text or
+        # speaker assignment changes. The managed source asset remains in the
+        # project until the user explicitly removes it.
+        old_clip_count = len(model.clips)
+        model.clips = [
+            clip for clip in model.clips
+            if not (
+                clip.kind == "voice"
+                and clip.script_line_id is not None
+                and clip.script_line_id not in valid_ids
+            )
+        ]
+        changed = len(model.clips) != old_clip_count
+
+        if not valid_lines:
+            if changed:
+                self.timeline_panel.refresh()
+                self.timeline_panel.changed.emit()
+            return changed
+
+        voice_track = next(
+            (
+                track for track in model.tracks
+                if track.kind == "audio" and track.name.lower() == "voice" and not track.locked
+            ),
+            None,
+        )
+        if voice_track is None:
+            suffix = 1 + sum(
+                1 for track in model.tracks
+                if track.kind == "audio" and track.name.lower().startswith("voice")
+            )
+            voice_track = model.add_track("Voice" if suffix == 1 else f"Voice {suffix}", "audio")
+            changed = True
+
+        timeline_start = 0.0
+        for line in self.script_panel.model.lines:
+            fingerprint = self.script_panel._synth_input_fingerprints.get(line.line_id)
+            wav_path = self.script_panel._synth_wav_paths.get(line.line_id)
+            record = self._project.settings.get("generated_audio_assets", {})
+            record = record.get(line.line_id) if isinstance(record, dict) else None
+            asset_id = record.get("asset_id") if isinstance(record, dict) else None
+            asset = self._project.get_asset(asset_id) if isinstance(asset_id, str) else None
+            if (
+                fingerprint
+                and self.script_panel.synthesis_fingerprint(line.line_id) == fingerprint
+                and isinstance(wav_path, str)
+                and Path(wav_path).is_file()
+                and asset is not None
+                and asset.kind == "audio"
+            ):
+                existing = next(
+                    (
+                        clip for clip in model.clips
+                        if clip.kind == "voice" and clip.script_line_id == line.line_id
+                    ),
+                    None,
+                )
+                clip_name = f"{line.speaker_name}: {line.text[:28]}".strip()
+                duration = max(0.05, line.duration_sec)
+                if existing is None:
+                    model.add_clip(
+                        voice_track.id,
+                        "voice",
+                        clip_name or "Voice",
+                        duration,
+                        start=timeline_start,
+                        asset_id=asset.id,
+                        script_line_id=line.line_id,
+                    )
+                    changed = True
+                else:
+                    desired = (
+                        existing.track_id != voice_track.id
+                        or existing.name != (clip_name or "Voice")
+                        or abs(existing.start - timeline_start) > 1e-6
+                        or abs(existing.duration - duration) > 1e-6
+                        or existing.asset_id != asset.id
+                    )
+                    if desired:
+                        existing.track_id = voice_track.id
+                        existing.name = clip_name or "Voice"
+                        existing.start = timeline_start
+                        existing.duration = duration
+                        existing.source_in = 0.0
+                        existing.asset_id = asset.id
+                        changed = True
+            timeline_start += line.duration_sec
+
+        if changed:
+            self.timeline_panel.refresh()
+            self.timeline_panel.changed.emit()
+        return changed
+
+    def _restore_generated_audio_assets(self) -> None:
+        """Restore cached WAVs only when their source text and voice still match."""
+        records = self._project.settings.get("generated_audio_assets", {})
+        if not isinstance(records, dict):
+            return
+        for line_id, record in records.items():
+            if not isinstance(line_id, str) or not isinstance(record, dict):
+                continue
+            asset_id = record.get("asset_id")
+            fingerprint = record.get("fingerprint")
+            if not isinstance(asset_id, str) or not isinstance(fingerprint, str):
+                continue
+            asset = self._project.get_asset(asset_id)
+            if asset is None or asset.kind != "audio":
+                continue
+            try:
+                path = self._project.resolve_asset(asset)
+                if path.is_file():
+                    self.script_panel.set_persisted_synth_audio(
+                        line_id, str(path), fingerprint
+                    )
+            except (OSError, ProjectError, ValueError):
+                continue
+        self._sync_generated_voice_timeline()
+
     def save_project(self) -> bool:
         if self._project.file_path is None:
             return self.save_project_as()
@@ -350,6 +572,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "プロジェクト保存エラー", str(exc))
             return False
         self._project_dirty = False
+        self._persist_pending_generated_audio()
         self._refresh_window_title()
         self.statusBar().showMessage(f"保存しました: {saved_path}", 5000)
         return True
@@ -374,6 +597,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "プロジェクト保存エラー", str(exc))
             return False
         self._project_dirty = False
+        self._persist_pending_generated_audio()
         self._refresh_window_title()
         self.statusBar().showMessage(f"保存しました: {saved_path}", 5000)
         return True
@@ -432,6 +656,7 @@ class MainWindow(QMainWindow):
             self._discard_pending = False
             return
         self._active_timeline_video_clip_id = None
+        self._pending_generated_audio.clear()
         self.preview_panel.close_video()
         self.timeline_panel.set_model(TimelineModel.create_default())
         self.timeline_audio.prune_removed_clips()
@@ -484,10 +709,12 @@ class MainWindow(QMainWindow):
             return
 
         self._active_timeline_video_clip_id = None
+        self._pending_generated_audio.clear()
         self.timeline_panel.set_model(timeline_model)
         self.timeline_audio.prune_removed_clips()
         self._project = project
         self._project_dirty = recovered
+        self._restore_generated_audio_assets()
         if self._discard_pending:
             # Keep a recovered autosave when reopening that exact project; it is
             # the only copy of changes the user explicitly chose to recover.
@@ -589,7 +816,7 @@ class MainWindow(QMainWindow):
             )
 
     def stop_timeline_playback(self) -> None:
-        """Stop both video and audio and return the playhead to the beginning."""
+        """Stop video and audio and return the playhead to the beginning."""
         self._timeline_playback_requested = False
         self._timeline_playback_generation += 1
         self._pending_timeline_clip_id = None
@@ -613,8 +840,6 @@ class MainWindow(QMainWindow):
             return
         self.timeline_panel.set_playhead(seconds)
 
-        # The audio clock is the transport clock when no video decoder is active.
-        # Start a video clip automatically when the running playhead reaches it.
         if self._pending_timeline_clip_id is None:
             clip = self._video_clip_at(seconds)
             if clip is not None and clip.asset_id is not None:

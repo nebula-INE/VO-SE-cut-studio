@@ -310,11 +310,15 @@ class TimelineEditorWidget(QWidget):
     playhead_changed = Signal(float)
     add_clip_requested = Signal()
     add_track_requested = Signal()
+    playback_toggle_requested = Signal()
+    playback_stop_requested = Signal()
 
     def __init__(self, model: TimelineModel | None = None) -> None:
         super().__init__()
         self.model = model or TimelineModel.create_default()
 
+        self.playback_button = QPushButton("▶ 再生")
+        self.stop_playback_button = QPushButton("■ 停止")
         self.add_clip_button = QPushButton("＋ クリップ")
         self.add_track_button = QPushButton("＋ トラック")
         self.split_button = QPushButton("分割")
@@ -325,6 +329,9 @@ class TimelineEditorWidget(QWidget):
         self.status_label = QLabel("ドラッグ: 移動／左右端: トリム")
 
         toolbar = QHBoxLayout()
+        toolbar.addWidget(self.playback_button)
+        toolbar.addWidget(self.stop_playback_button)
+        toolbar.addSpacing(8)
         toolbar.addWidget(self.add_clip_button)
         toolbar.addWidget(self.add_track_button)
         toolbar.addSpacing(8)
@@ -353,6 +360,8 @@ class TimelineEditorWidget(QWidget):
         self.canvas.changed.connect(self.changed.emit)
         self.canvas.playhead_changed.connect(self._on_playhead_changed)
         self.canvas.selection_changed.connect(self._on_selection_changed)
+        self.playback_button.clicked.connect(self.playback_toggle_requested.emit)
+        self.stop_playback_button.clicked.connect(self.playback_stop_requested.emit)
         self.add_clip_button.clicked.connect(self.add_clip_requested.emit)
         self.add_track_button.clicked.connect(self.add_track_requested.emit)
         self.split_button.clicked.connect(self.split_selected_at_playhead)
@@ -400,6 +409,9 @@ class TimelineEditorWidget(QWidget):
 
     def set_playhead(self, seconds: float) -> None:
         self.canvas.set_playhead(seconds)
+
+    def set_playback_state(self, playing: bool) -> None:
+        self.playback_button.setText("Ⅱ 一時停止" if playing else "▶ 再生")
 
     def split_selected_at_playhead(self) -> None:
         clip_id = self.selected_clip_id

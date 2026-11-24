@@ -457,19 +457,60 @@ class ProjectDocument:
         self.assets.append(asset)
         return asset
 
+    def _resolve_managed_asset_path(self, asset: ProjectAsset) -> Path:
+        """Resolve only paths inside the project's dedicated assets/<kind>/ tree."""
+        if self.file_path is None:
+            raise ProjectError("Cannot resolve managed assets before the project is saved")
+        if "\\" in asset.path:
+            raise ProjectError("Managed asset paths must use project-relative POSIX separators")
+        relative = PurePosixPath(asset.path)
+        windows_path = PureWindowsPath(asset.path)
+        if relative.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+            raise ProjectError("Managed assets must use project-relative paths")
+        parts = relative.parts
+        if (
+            len(parts) < 3
+            or parts[0] != "assets"
+            or parts[1] not in ASSET_KINDS
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ProjectError(
+                "Managed assets must be stored under assets/<kind>/ and cannot reference project files"
+            )
+
+        root = self.file_path.parent.resolve()
+        kind_root = root / "assets" / parts[1]
+        candidate = root.joinpath(*parts)
+
+        # Reject links at every level, including the leaf, instead of following
+        # project-controlled paths to other files.
+        current = root
+        for part in parts:
+            current = current / part
+            if current.is_symlink():
+                raise ProjectError("Managed asset paths cannot traverse symbolic links")
+
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(kind_root.resolve())
+        except ValueError as exc:
+            raise ProjectError("Managed asset path escapes its assets/<kind> directory") from exc
+        if resolved == self.file_path.resolve():
+            raise ProjectError("Refusing to treat the project document as a managed asset")
+        return resolved
+
     def resolve_asset(self, asset: ProjectAsset | str) -> Path:
         selected = self.get_asset(asset) if isinstance(asset, str) else asset
         if selected is None:
             raise KeyError(f"Unknown asset: {asset}")
+        if selected.managed:
+            return self._resolve_managed_asset_path(selected)
+
         stored = Path(selected.path).expanduser()
         windows_path = PureWindowsPath(selected.path)
         if stored.is_absolute():
-            if selected.managed:
-                raise ProjectError("Managed assets must use project-relative paths")
             return stored.resolve()
         if windows_path.is_absolute() or windows_path.drive:
-            if selected.managed:
-                raise ProjectError("Managed assets must use project-relative paths")
             # Keep paths authored on Windows recognizable when opened elsewhere.
             return stored
         if ".." in PurePosixPath(selected.path).parts or ".." in windows_path.parts:
@@ -492,15 +533,8 @@ class ProjectDocument:
         if asset is None:
             return False
         if delete_managed_file and asset.managed:
-            resolved = self.resolve_asset(asset)
+            resolved = self._resolve_managed_asset_path(asset)
             if resolved.exists():
-                if self.file_path is None:
-                    raise ProjectError("Cannot remove a managed asset without a project path")
-                root = self.file_path.parent.resolve()
-                try:
-                    resolved.relative_to(root)
-                except ValueError as exc:
-                    raise ProjectError("Refusing to delete an asset outside the project folder") from exc
                 if resolved.is_dir():
                     shutil.rmtree(resolved)
                 else:

@@ -575,8 +575,11 @@ class MainWindow(QMainWindow):
         if clip is not None and clip.kind == "video":
             timeline_seconds = clip.timeline_time_at(source_seconds)
             self.timeline_panel.set_playhead(timeline_seconds)
-            if self._timeline_playback_requested and self.timeline_audio.is_playing:
-                self.timeline_audio.sync_to_timeline(timeline_seconds)
+            if self._timeline_playback_requested and self.preview_panel.is_playing:
+                if self.timeline_audio.is_playing:
+                    self.timeline_audio.sync_to_timeline(timeline_seconds)
+                else:
+                    self.timeline_audio.start(timeline_seconds)
             if (
                 self._timeline_playback_requested
                 and self.preview_panel.is_playing

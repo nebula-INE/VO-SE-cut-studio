@@ -660,10 +660,16 @@ class MainWindow(QMainWindow):
                     opened = self.preview_panel.seek_to(clip.source_in)
                     if opened:
                         self.preview_panel.resume_playback()
+                if not opened:
+                    # open_video() starts the decoder timer before the trim-in
+                    # seek. If that seek fails, close the just-opened decoder so
+                    # no untracked source playback can continue in the background.
+                    self.preview_panel.close_video()
             finally:
                 self._timeline_playback_transition = False
             if not opened:
                 self._timeline_playback_requested = False
+                self._pending_timeline_clip_id = None
                 self.statusBar().showMessage(f"動画を開けませんでした: {path}", 6000)
                 return
             self._timeline_playback_requested = True

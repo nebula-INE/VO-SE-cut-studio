@@ -189,3 +189,63 @@ def test_next_clip_after_returns_none_for_unknown_or_final_clip():
 
     assert model.next_clip_after("missing") is None
     assert model.next_clip_after(clip.id) is None
+
+
+def test_upsert_voice_clip_preserves_user_moved_and_trimmed_existing_clip():
+    model = TimelineModel.create_default()
+    voice_track = next(track for track in model.tracks if track.kind == "audio")
+    alternate_track = model.add_track("Dialogue", "audio")
+    existing = model.add_clip(
+        voice_track.id,
+        "voice",
+        "Narrator: original",
+        4.0,
+        start=12.5,
+        source_in=0.75,
+        asset_id="old-voice",
+        script_line_id="line-voice-1",
+    )
+    model.move_clip(existing.id, 12.5, track_id=alternate_track.id, snap_seconds=None)
+    model.trim_clip(existing.id, source_in=1.25, duration=2.5)
+
+    restored, changed = model.upsert_voice_clip(
+        voice_track.id,
+        "Narrator: regenerated",
+        3.0,
+        start=0.0,
+        asset_id="new-voice",
+        script_line_id="line-voice-1",
+    )
+
+    assert restored is existing
+    assert changed
+    assert existing.track_id == alternate_track.id
+    assert existing.name == "Narrator: original"
+    assert existing.start == 12.5
+    assert existing.duration == 2.5
+    assert existing.source_in == 1.25
+    assert existing.asset_id == "new-voice"
+    assert len([clip for clip in model.clips if clip.script_line_id == "line-voice-1"]) == 1
+
+
+def test_upsert_voice_clip_creates_missing_line_at_script_position():
+    model = TimelineModel.create_default()
+    voice_track = next(track for track in model.tracks if track.kind == "audio")
+
+    created, changed = model.upsert_voice_clip(
+        voice_track.id,
+        "Narrator: first line",
+        1.75,
+        start=3.25,
+        asset_id="voice-asset",
+        script_line_id="line-new",
+    )
+
+    assert changed
+    assert created.kind == "voice"
+    assert created.track_id == voice_track.id
+    assert created.start == 3.25
+    assert created.duration == 1.75
+    assert created.source_in == 0.0
+    assert created.asset_id == "voice-asset"
+    assert created.script_line_id == "line-new"

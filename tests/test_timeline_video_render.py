@@ -38,15 +38,14 @@ def test_timeline_video_clips_follow_track_order_and_skip_muted_tracks():
     assert timeline_video_clips(model) == [video, image]
 
 
-def test_timeline_video_clips_reject_unrendered_text_and_character_clips():
+def test_timeline_video_clips_accept_subtitle_text_clips():
     model = TimelineModel.create_default()
     overlay = next(track for track in model.tracks if track.kind == "overlay")
     model.add_clip(
         overlay.id, "text", "subtitle", 1.0, script_line_id="line-1"
     )
 
-    with pytest.raises(VideoRenderError, match="字幕"):
-        timeline_video_clips(model)
+    assert timeline_video_clips(model)[0].kind == "text"
 
 
 def test_render_timeline_video_builds_filtered_composite_and_writes_atomically(
@@ -215,6 +214,82 @@ def test_render_timeline_video_rejects_duration_shorter_than_clip(tmp_path):
 
 
 def test_timeline_video_clips_reject_motion_track_payloads():
+    model = TimelineModel.create_default()
+    motion_track = next(track for track in model.tracks if track.kind == "motion")
+    model.add_clip(
+        motion_track.id, "motion", "body motion", 1.0, script_line_id="motion-1"
+    )
+
+    with pytest.raises(VideoRenderError, match="モーションクリップ"):
+        timeline_video_clips(model)
+
+
+
+def test_timeline_video_clips_resolve_latest_subtitle_text_from_script_line():
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    subtitle = model.add_clip(
+        overlay.id, "text", "古い字幕", 1.25,
+        start=0.5, script_line_id="line-42",
+    )
+
+    assert timeline_video_clips(model, {"line-42": "最新の字幕"}) == [subtitle]
+
+
+def test_render_timeline_video_adds_subtitle_as_timed_overlay(tmp_path, monkeypatch):
+    model = TimelineModel.create_default()
+    video_track = next(track for track in model.tracks if track.kind == "video")
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    video = model.add_clip(video_track.id, "video", "scene", 3.0, asset_id="video")
+    model.add_clip(
+        overlay.id, "text", "古いテキスト", 1.5,
+        start=0.75, script_line_id="line-a",
+    )
+    video_path = tmp_path / "scene.mp4"
+    video_path.write_bytes(b"video")
+    output = tmp_path / "with-subtitles.mp4"
+    executable = tmp_path / "ffmpeg"
+    executable.write_bytes(b"fake ffmpeg")
+    captured = {}
+
+    monkeypatch.setattr(
+        timeline_video_render,
+        "probe_video_dimensions",
+        lambda *_args, **_kwargs: (1280, 720),
+    )
+
+    def fake_subtitle(text, width, height, path):
+        path = Path(path)
+        path.write_text(text, encoding="utf-8")
+        captured["subtitle"] = (text, width, height, path)
+        return path
+
+    monkeypatch.setattr(timeline_video_render, "render_subtitle_png", fake_subtitle)
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(timeline_video_render.subprocess, "run", fake_run)
+    result = render_timeline_video(
+        model,
+        lambda _clip: video_path,
+        output,
+        subtitle_texts={"line-a": "最新テキスト"},
+        ffmpeg_path=executable,
+    )
+
+    graph = captured["command"][captured["command"].index("-filter_complex") + 1]
+    assert captured["subtitle"][:3] == ("最新テキスト", 1280, 720)
+    assert "setpts=PTS-STARTPTS+0.75/TB" in graph
+    assert "gte(t,0.75)" in graph
+    assert "lt(t,2.25)" in graph
+    assert result.video_clip_count == 1
+    assert result.subtitle_clip_count == 1
+
+
+def test_timeline_video_clips_still_reject_motion_tracks():
     model = TimelineModel.create_default()
     motion_track = next(track for track in model.tracks if track.kind == "motion")
     model.add_clip(

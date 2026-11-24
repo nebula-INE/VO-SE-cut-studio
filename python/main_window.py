@@ -256,18 +256,20 @@ class _TimelineFullVideoExportTask(QRunnable):
         asset_paths: dict[str, str],
         output_path: str,
         ffmpeg_path: str,
+        subtitle_texts: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.timeline_payload = timeline_payload
         self.asset_paths = asset_paths
         self.output_path = output_path
         self.ffmpeg_path = ffmpeg_path
+        self.subtitle_texts = dict(subtitle_texts or {})
         self.signals = _TimelineAudioRenderSignals()
 
     def run(self) -> None:
         try:
             model = TimelineModel.from_dict(self.timeline_payload)
-            visual_clips = timeline_video_clips(model)
+            visual_clips = timeline_video_clips(model, self.subtitle_texts)
             audio_clips = timeline_audio_clips(model)
             duration = max(
                 [clip.end for clip in visual_clips]
@@ -284,6 +286,7 @@ class _TimelineFullVideoExportTask(QRunnable):
                     silent_video_path,
                     duration_seconds=duration,
                     ffmpeg_path=self.ffmpeg_path,
+                    subtitle_texts=self.subtitle_texts,
                 )
                 clipped_sample_count = 0
                 peak_level = 0.0
@@ -307,6 +310,7 @@ class _TimelineFullVideoExportTask(QRunnable):
             self.signals.finished.emit({
                 "output_path": str(Path(self.output_path).expanduser().resolve()),
                 "video_clip_count": video_result.video_clip_count,
+                "subtitle_clip_count": video_result.subtitle_clip_count,
                 "audio_clip_count": len(audio_clips),
                 "duration_seconds": video_result.duration_seconds,
                 "width": video_result.width,
@@ -1532,7 +1536,12 @@ class MainWindow(QMainWindow):
 
         try:
             snapshot = TimelineModel.from_dict(self.timeline_panel.model.to_dict())
-            visual_clips = timeline_video_clips(snapshot)
+            subtitle_texts = {
+                str(line.get("line_id", "")): str(line.get("text", ""))
+                for line in self.script_panel.model.to_dict().get("lines", [])
+                if line.get("line_id") and str(line.get("text", "")).strip()
+            }
+            visual_clips = timeline_video_clips(snapshot, subtitle_texts)
         except (TimelineError, VideoRenderError) as exc:
             QMessageBox.warning(self, "タイムラインMP4書き出し", str(exc))
             return
@@ -1549,6 +1558,8 @@ class MainWindow(QMainWindow):
         try:
             asset_paths: dict[str, str] = {}
             for clip in all_clips:
+                if clip.kind == "text":
+                    continue
                 asset = self._project.get_asset(clip.asset_id or "")
                 if asset is None:
                     raise ProjectError(f"クリップ「{clip.name}」の素材参照がありません")
@@ -1596,6 +1607,7 @@ class MainWindow(QMainWindow):
             asset_paths,
             str(output_path),
             ffmpeg_path,
+            subtitle_texts,
         )
         task.signals.finished.connect(self._on_timeline_full_video_export_finished)
         task.signals.failed.connect(self._on_timeline_full_video_export_failed)
@@ -1621,6 +1633,7 @@ class MainWindow(QMainWindow):
             "タイムライン全体をMP4に書き出しました。\\n"
             f"保存先: {result['output_path']}\\n"
             f"映像・静止画: {result['video_clip_count']} クリップ / "
+            f"字幕: {result['subtitle_clip_count']} クリップ / "
             f"音声: {result['audio_clip_count']} クリップ\\n"
             f"解像度: {result['width']}×{result['height']} / "
             f"{result['frame_rate']:g} fps / {result['duration_seconds']:.2f} 秒"

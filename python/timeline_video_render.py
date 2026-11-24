@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from media_ffmpeg import (
     MediaToolError,
@@ -19,6 +19,7 @@ from media_ffmpeg import (
     probe_video_dimensions,
 )
 from timeline_model import TimelineClip, TimelineModel
+from subtitle_overlay import render_subtitle_png
 
 
 class VideoRenderError(RuntimeError):
@@ -33,9 +34,13 @@ class VideoRenderResult:
     width: int
     height: int
     frame_rate: float
+    subtitle_clip_count: int = 0
 
 
-def timeline_video_clips(model: TimelineModel) -> list[TimelineClip]:
+def timeline_video_clips(
+    model: TimelineModel,
+    subtitle_texts: Mapping[str, str] | None = None,
+) -> list[TimelineClip]:
     """Return visible, enabled video/image clips in track and timeline order.
 
     Text, live character and motion clips are rejected rather than silently
@@ -58,8 +63,18 @@ def timeline_video_clips(model: TimelineModel) -> list[TimelineClip]:
         for clip in model.clips_for_track(track.id):
             if not clip.enabled:
                 continue
-            if clip.kind in {"text", "character", "motion"}:
+            if clip.kind in {"character", "motion"}:
                 unsupported.append(f"{clip.kind}: {clip.name}")
+            elif clip.kind == "text":
+                text = (
+                    subtitle_texts.get(clip.script_line_id or "")
+                    if subtitle_texts is not None else None
+                )
+                text = text if text is not None else clip.name
+                if not text.strip():
+                    unsupported.append(f"text: {clip.name or clip.id}")
+                else:
+                    selected.append(clip)
             elif clip.kind in {"video", "image"}:
                 if clip.asset_id is None:
                     raise VideoRenderError(
@@ -71,7 +86,7 @@ def timeline_video_clips(model: TimelineModel) -> list[TimelineClip]:
         examples = "、".join(unsupported[:5])
         extra = "" if len(unsupported) <= 5 else f" ほか {len(unsupported) - 5} 件"
         raise VideoRenderError(
-            "現在のMP4書き出しでは字幕・動的キャラクター・モーションクリップを"
+            "現在のMP4書き出しでは動的キャラクター・モーションクリップを"
             f"映像へ焼き込めません: {examples}{extra}。これらを非表示または削除してから"
             "書き出してください。"
         )
@@ -100,6 +115,7 @@ def render_timeline_video(
     duration_seconds: float | None = None,
     ffmpeg_path: str | Path | None = None,
     still_image_canvas: tuple[int, int] = (1920, 1080),
+    subtitle_texts: Mapping[str, str] | None = None,
 ) -> VideoRenderResult:
     """Composite enabled timeline video and still-image clips into an MP4.
 
@@ -107,7 +123,7 @@ def render_timeline_video(
     tracks. Each source is fitted and centered on a black canvas. Video source
     trims, timeline offsets, and clip durations are applied non-destructively.
     """
-    clips = timeline_video_clips(model)
+    clips = timeline_video_clips(model, subtitle_texts)
     if not clips:
         raise VideoRenderError("有効で表示中の動画・静止画クリップがありません")
 
@@ -122,8 +138,11 @@ def render_timeline_video(
     if duration <= 0.0 or duration + 1e-6 < natural_duration:
         raise VideoRenderError("書き出し時間が映像クリップの終端より短くなっています")
 
-    resolved: list[tuple[TimelineClip, Path]] = []
+    resolved: list[tuple[TimelineClip, Path | None]] = []
     for clip in clips:
+        if clip.kind == "text":
+            resolved.append((clip, None))
+            continue
         try:
             source = Path(asset_resolver(clip)).expanduser().resolve()
         except Exception as exc:
@@ -141,13 +160,13 @@ def render_timeline_video(
         raise VideoRenderError("タイムライン映像の出力先は .mp4 を指定してください")
     try:
         destination = destination.resolve()
-        if destination in {path for _clip, path in resolved}:
+        if destination in {path for _clip, path in resolved if path is not None}:
             raise VideoRenderError("元の映像・画像素材を上書きすることはできません")
     except OSError as exc:
         raise VideoRenderError(f"出力先を確認できません: {exc}") from exc
 
     first_video = next(
-        ((clip, path) for clip, path in resolved if clip.kind == "video"),
+        ((clip, path) for clip, path in resolved if clip.kind == "video" and path is not None),
         None,
     )
     try:
@@ -184,15 +203,47 @@ def render_timeline_video(
         "-loglevel", "error",
         "-y",
     ]
-    for clip, source in resolved:
-        if clip.kind == "image":
-            command.extend([
-                "-loop", "1",
-                "-framerate", _filter_number(frame_rate),
-                "-i", str(source),
-            ])
-        else:
-            command.extend(["-i", str(source)])
+    subtitle_temp_dir = tempfile.mkdtemp(prefix="aural-subtitles-")
+    try:
+        for index, (clip, source) in enumerate(resolved):
+            if clip.kind in {"image", "text"}:
+                if clip.kind == "image":
+                    if source is None:
+                        raise VideoRenderError(
+                            f"静止画クリップ「{clip.name}」の素材がありません"
+                        )
+                    image_source = source
+                else:
+                    subtitle_text = (
+                        subtitle_texts.get(clip.script_line_id or "")
+                        if subtitle_texts is not None else None
+                    )
+                    subtitle_text = subtitle_text if subtitle_text is not None else clip.name
+                    if not subtitle_text.strip():
+                        raise VideoRenderError(
+                            f"字幕クリップ「{clip.name}」に表示テキストがありません"
+                        )
+                    image_source = render_subtitle_png(
+                        subtitle_text,
+                        width,
+                        height,
+                        Path(subtitle_temp_dir) / f"subtitle_{index}.png",
+                    )
+                command.extend([
+                    "-loop", "1",
+                    "-framerate", _filter_number(frame_rate),
+                    "-i", str(image_source),
+                ])
+            else:
+                if source is None:
+                    raise VideoRenderError(
+                        f"動画クリップ「{clip.name}」の素材がありません"
+                    )
+                command.extend(["-i", str(source)])
+    except Exception:
+        import shutil
+        shutil.rmtree(subtitle_temp_dir, ignore_errors=True)
+        raise
 
     previous_label = "base0"
     for index, (clip, _source) in enumerate(resolved):
@@ -281,8 +332,9 @@ def render_timeline_video(
     return VideoRenderResult(
         output_path=destination,
         duration_seconds=duration,
-        video_clip_count=len(resolved),
+        video_clip_count=sum(1 for clip, _ in resolved if clip.kind in {"video", "image"}),
         width=width,
         height=height,
         frame_rate=frame_rate,
+        subtitle_clip_count=sum(1 for clip, _ in resolved if clip.kind == "text"),
     )

@@ -72,3 +72,20 @@ def test_locked_track_cannot_be_split_or_deleted_from_toolbar(qapp):
 
     assert len(model.clips) == 1
     assert model.get_clip(clip.id) is not None
+
+
+def test_timeline_transport_buttons_emit_start_pause_and_stop_requests(qapp):
+    editor = TimelineEditorWidget(TimelineModel.create_default())
+    requests = []
+    editor.playback_toggle_requested.connect(lambda: requests.append("toggle"))
+    editor.playback_stop_requested.connect(lambda: requests.append("stop"))
+
+    editor.playback_button.click()
+    editor.set_playback_state(True)
+    assert editor.playback_button.text() == "Ⅱ 一時停止"
+    editor.playback_button.click()
+    editor.stop_playback_button.click()
+
+    assert requests == ["toggle", "toggle", "stop"]
+    editor.close()
+    editor.deleteLater()

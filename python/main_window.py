@@ -182,6 +182,8 @@ class MainWindow(QMainWindow):
         self._pending_timeline_clip_id: str | None = None
         self.timeline_panel.changed.connect(self._on_timeline_edited)
         self.timeline_panel.playhead_changed.connect(self._on_timeline_playhead_changed)
+        self.timeline_panel.playback_toggle_requested.connect(self.toggle_timeline_playback)
+        self.timeline_panel.playback_stop_requested.connect(self.stop_timeline_playback)
         self.timeline_panel.canvas.selection_changed.connect(self._on_timeline_selection_changed)
         self.preview_panel.current_time_changed.connect(self._on_video_time_changed)
         self.preview_panel.playback_state_changed.connect(self._on_preview_playback_state_changed)
@@ -558,16 +560,67 @@ class MainWindow(QMainWindow):
             raise ProjectError(f"音声クリップ「{clip.name}」の素材参照がありません")
         return self._project.resolve_asset(asset)
 
+    def toggle_timeline_playback(self) -> None:
+        """Start/pause the whole timeline, including projects with audio only."""
+        if self._timeline_playback_requested:
+            self._timeline_playback_requested = False
+            self._timeline_playback_generation += 1
+            self._pending_timeline_clip_id = None
+            self._pause_preview_for_transition()
+            self.timeline_audio.pause()
+            self.timeline_panel.set_playback_state(False)
+            return
+
+        start_seconds = self.timeline_panel.playhead_seconds
+        self._timeline_playback_requested = True
+        self._timeline_playback_generation += 1
+        generation = self._timeline_playback_generation
+        self._pending_timeline_clip_id = None
+        self.timeline_panel.set_playback_state(True)
+        self.timeline_audio.start(start_seconds)
+
+        clip = self._video_clip_at(start_seconds)
+        if clip is not None and clip.asset_id is not None:
+            self._pending_timeline_clip_id = clip.id
+            self._start_timeline_video_clip(
+                clip.id, generation, timeline_seconds=start_seconds
+            )
+
+    def stop_timeline_playback(self) -> None:
+        """Stop both video and audio and return the playhead to the beginning."""
+        self._timeline_playback_requested = False
+        self._timeline_playback_generation += 1
+        self._pending_timeline_clip_id = None
+        self._pause_preview_for_transition()
+        self.timeline_audio.pause()
+        self.timeline_panel.set_playback_state(False)
+        self.timeline_panel.set_playhead(0.0)
+
     def _on_audio_timeline_position_changed(self, seconds: float) -> None:
-        """Advance the playhead while video is paused in a gap or after its end."""
+        """Drive audio-only sections and bridge into video clips when encountered."""
         if not self._timeline_playback_requested or self.preview_panel.is_playing:
             return
         self.timeline_panel.set_playhead(seconds)
+
+        # The audio clock is the transport clock when no video decoder is active.
+        # Start a video clip automatically when the running playhead reaches it.
+        if self._pending_timeline_clip_id is None:
+            clip = self._video_clip_at(seconds)
+            if clip is not None and clip.asset_id is not None:
+                self._timeline_playback_generation += 1
+                generation = self._timeline_playback_generation
+                self._pending_timeline_clip_id = clip.id
+                self._start_timeline_video_clip(
+                    clip.id, generation, timeline_seconds=seconds
+                )
+                return
+
         duration = self.timeline_panel.model.duration_sec
         if self._pending_timeline_clip_id is None and seconds >= duration:
             self.timeline_panel.set_playhead(duration)
             self._timeline_playback_requested = False
             self.timeline_audio.pause()
+            self.timeline_panel.set_playback_state(False)
 
     def _on_video_time_changed(self, source_seconds: float) -> None:
         """Map video PTS to the timeline and synchronize the audio transport."""
@@ -594,12 +647,15 @@ class MainWindow(QMainWindow):
         if self._timeline_playback_transition:
             return
         self._timeline_playback_requested = bool(playing)
+        self.timeline_panel.set_playback_state(bool(playing))
         if not playing:
             self._timeline_playback_generation += 1
             self._pending_timeline_clip_id = None
             self.timeline_audio.pause()
             return
-        if self._active_timeline_video_clip_id is not None:
+        if self.timeline_audio.is_playing:
+            self.timeline_audio.sync_to_timeline(self.timeline_panel.playhead_seconds)
+        else:
             self.timeline_audio.start(self.timeline_panel.playhead_seconds)
 
     def _on_preview_playback_finished(self) -> None:
@@ -609,6 +665,8 @@ class MainWindow(QMainWindow):
         clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
         if clip is None or clip.kind != "video":
             self._timeline_playback_requested = False
+            self.timeline_audio.pause()
+            self.timeline_panel.set_playback_state(False)
             return
         self._advance_timeline_video_clip(clip)
 
@@ -655,11 +713,14 @@ class MainWindow(QMainWindow):
         self._timeline_playback_requested = False
         self._pending_timeline_clip_id = None
         self.timeline_audio.pause()
+        self.timeline_panel.set_playback_state(False)
         if message:
             self.statusBar().showMessage(message, 6000)
 
-    def _start_timeline_video_clip(self, clip_id: str, generation: int) -> None:
-        """Open/seek the next clip and resume playback if the transition is current."""
+    def _start_timeline_video_clip(
+        self, clip_id: str, generation: int, *, timeline_seconds: float | None = None
+    ) -> None:
+        """Open/seek a timeline clip and resume if the transition is current."""
         if (
             generation != self._timeline_playback_generation
             or not self._timeline_playback_requested
@@ -688,7 +749,11 @@ class MainWindow(QMainWindow):
             self._pending_timeline_clip_id = None
             self._project.settings["active_timeline_video_clip_id"] = clip.id
             self._project.settings["active_video_asset_id"] = asset.id
-            self.timeline_panel.set_playhead(clip.start)
+            target_timeline_seconds = clip.start if timeline_seconds is None else min(
+                max(clip.start, timeline_seconds), clip.end - 1e-6
+            )
+            source_seconds = clip.source_time_at(target_timeline_seconds)
+            self.timeline_panel.set_playhead(target_timeline_seconds)
             if changed:
                 self._mark_project_dirty()
 
@@ -700,9 +765,9 @@ class MainWindow(QMainWindow):
                     # Timeline clips may be trimmed, so seek to source_in before
                     # the next timer tick decodes the first playback frame.
                     if opened:
-                        opened = self.preview_panel.seek_to(clip.source_in)
+                        opened = self.preview_panel.seek_to(source_seconds)
                 else:
-                    opened = self.preview_panel.seek_to(clip.source_in)
+                    opened = self.preview_panel.seek_to(source_seconds)
                     if opened:
                         self.preview_panel.resume_playback()
                 if not opened:
@@ -717,9 +782,10 @@ class MainWindow(QMainWindow):
                 return
             self._timeline_playback_requested = True
             if self.timeline_audio.is_playing:
-                self.timeline_audio.sync_to_timeline(clip.start)
+                self.timeline_audio.sync_to_timeline(target_timeline_seconds)
             else:
-                self.timeline_audio.start(clip.start)
+                self.timeline_audio.start(target_timeline_seconds)
+            self.timeline_panel.set_playback_state(True)
         except (OSError, ProjectError) as exc:
             self._abort_timeline_video_transition(f"次の動画クリップを開けません: {exc}")
 

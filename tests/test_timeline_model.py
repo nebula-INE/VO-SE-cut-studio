@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import pytest
+
+from timeline_model import TimelineError, TimelineModel
+
+
+def _model_with_clip():
+    model = TimelineModel.create_default()
+    video_track = next(track for track in model.tracks if track.kind == "video")
+    clip = model.add_clip(
+        video_track.id,
+        "video",
+        "scene.mov",
+        12.0,
+        start=2.0,
+        source_in=1.5,
+        asset_id="asset-video",
+    )
+    return model, video_track, clip
+
+
+def test_timeline_round_trip_preserves_tracks_clips_and_frame_rate():
+    model, _, clip = _model_with_clip()
+    model.frame_rate = 29.97
+
+    restored = TimelineModel.from_dict(model.to_dict())
+
+    assert restored.frame_rate == 29.97
+    assert len(restored.tracks) == 4
+    restored_clip = restored.get_clip(clip.id)
+    assert restored_clip is not None
+    assert restored_clip.start == 2.0
+    assert restored_clip.source_in == 1.5
+    assert restored_clip.duration == 12.0
+    assert restored_clip.asset_id == "asset-video"
+
+
+def test_move_clip_snaps_to_grid_and_can_move_between_compatible_tracks():
+    model, _, clip = _model_with_clip()
+    second_video_track = model.add_track("Video 2", "video")
+
+    moved = model.move_clip(clip.id, 4.24, track_id=second_video_track.id)
+
+    assert moved.start == 4.2
+    assert moved.track_id == second_video_track.id
+
+
+def test_clip_cannot_move_to_incompatible_track():
+    model, _, clip = _model_with_clip()
+    audio_track = next(track for track in model.tracks if track.kind == "audio")
+
+    with pytest.raises(TimelineError, match="different kind"):
+        model.move_clip(clip.id, 5.0, track_id=audio_track.id)
+
+
+def test_trim_changes_source_in_and_duration_without_changing_timeline_start():
+    model, _, clip = _model_with_clip()
+
+    trimmed = model.trim_clip(clip.id, source_in=3.0, duration=6.5)
+
+    assert trimmed.start == 2.0
+    assert trimmed.source_in == 3.0
+    assert trimmed.duration == 6.5
+    assert trimmed.source_out == 9.5
+
+
+def test_split_creates_two_non_overlapping_source_contiguous_clips():
+    model, _, clip = _model_with_clip()
+
+    left, right = model.split_clip(clip.id, 8.0)
+
+    assert left.id == clip.id
+    assert left.start == 2.0
+    assert left.duration == 6.0
+    assert right.start == 8.0
+    assert right.duration == 6.0
+    assert right.source_in == 7.5
+    assert left.source_out == right.source_in
+    assert len(model.clips) == 2
+
+
+def test_split_too_close_to_edges_is_rejected():
+    model, _, clip = _model_with_clip()
+
+    with pytest.raises(TimelineError, match="Split point"):
+        model.split_clip(clip.id, clip.start + 0.01)
+
+    with pytest.raises(TimelineError, match="Split point"):
+        model.split_clip(clip.id, clip.end - 0.01)
+
+
+def test_remove_track_requires_explicit_clip_removal():
+    model, track, clip = _model_with_clip()
+
+    with pytest.raises(TimelineError, match="still contains clips"):
+        model.remove_track(track.id)
+
+    assert model.get_clip(clip.id) is not None
+    assert model.remove_track(track.id, remove_clips=True)
+    assert model.get_clip(clip.id) is None
+
+
+def test_clip_timing_and_track_references_are_validated_on_load():
+    model, _, _ = _model_with_clip()
+    payload = model.to_dict()
+    payload["clips"][0]["start"] = -1
+
+    with pytest.raises(TimelineError, match="cannot be negative"):
+        TimelineModel.from_dict(payload)
+
+    payload = model.to_dict()
+    payload["clips"][0]["track_id"] = "missing-track"
+    with pytest.raises(TimelineError, match="unknown track"):
+        TimelineModel.from_dict(payload)
+
+
+def test_timeline_duration_is_maximum_clip_end_not_sum_of_clip_durations():
+    model, track, _ = _model_with_clip()
+    model.add_clip(track.id, "video", "later.mov", 3.0, start=20.0, asset_id="later")
+
+    assert model.duration_sec == 23.0
+
+
+def test_project_document_persists_timeline_payload(tmp_path):
+    from project_model import ProjectDocument
+
+    project = ProjectDocument.create("Timeline Project")
+    timeline = TimelineModel.create_default()
+    track = next(item for item in timeline.tracks if item.kind == "audio")
+    clip = timeline.add_clip(
+        track.id,
+        "audio",
+        "music.wav",
+        18.0,
+        start=3.0,
+        asset_id="asset-audio",
+    )
+    project.timeline = timeline.to_dict()
+
+    saved_path = project.save(tmp_path / "timeline.auralproj")
+    restored_project = ProjectDocument.load(saved_path)
+    restored_timeline = TimelineModel.from_dict(restored_project.timeline)
+
+    restored_clip = restored_timeline.get_clip(clip.id)
+    assert restored_clip is not None
+    assert restored_clip.start == 3.0
+    assert restored_clip.duration == 18.0
+    assert restored_clip.asset_id == "asset-audio"
+
+
+def test_clip_converts_between_timeline_and_source_positions_with_clamping():
+    model, _, clip = _model_with_clip()
+
+    assert clip.source_time_at(2.0) == 1.5
+    assert clip.source_time_at(5.0) == 4.5
+    assert clip.source_time_at(0.0) == 1.5
+    assert clip.source_time_at(99.0) == 13.5
+    assert clip.timeline_time_at(1.5) == 2.0
+    assert clip.timeline_time_at(4.5) == 5.0
+    assert clip.timeline_time_at(0.0) == 2.0
+    assert clip.timeline_time_at(999.0) == clip.end

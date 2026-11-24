@@ -292,3 +292,22 @@ def test_asset_path_with_control_characters_is_rejected(tmp_path, managed):
 
     with pytest.raises(ProjectError, match="control characters"):
         ProjectDocument.from_dict(payload, tmp_path / "invalid-path.auralproj")
+
+
+def test_asset_referenced_by_timeline_clip_cannot_be_removed(tmp_path):
+    project = ProjectDocument.create("Referenced Asset")
+    project.save(tmp_path / "referenced.auralproj")
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"voice-data")
+    asset = project.add_asset(source, "audio")
+    project.timeline["clips"] = [{
+        "id": "clip-1",
+        "asset_id": asset.id,
+        "kind": "audio",
+    }]
+
+    with pytest.raises(ProjectError, match="referenced by a timeline clip"):
+        project.remove_asset(asset.id, delete_managed_file=True)
+
+    assert project.get_asset(asset.id) is asset
+    assert source.is_file()

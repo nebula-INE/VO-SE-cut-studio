@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import platform
 import sys
+import wave
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, Signal, QTimer
@@ -32,6 +33,8 @@ from PySide6.QtWidgets import (
 from preview import PreviewPanel
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
+from timeline_editor import TimelineEditorWidget
+from timeline_model import TimelineError, TimelineModel
 
 try:
     from osc_receiver import OscMocapReceiver
@@ -160,6 +163,15 @@ class MainWindow(QMainWindow):
         self.script_panel.content_changed.connect(self._mark_project_dirty)
         self.script_panel.asset_imported.connect(self._register_linked_asset)
 
+        self.timeline_panel = TimelineEditorWidget(TimelineModel.create_default())
+        self._active_timeline_video_clip_id: str | None = None
+        self.timeline_panel.changed.connect(self._on_timeline_edited)
+        self.timeline_panel.playhead_changed.connect(self._on_timeline_playhead_changed)
+        self.timeline_panel.canvas.selection_changed.connect(self._on_timeline_selection_changed)
+        self.preview_panel.current_time_changed.connect(self._on_video_time_changed)
+        self.timeline_panel.add_clip_requested.connect(self.add_timeline_clip_from_assets)
+        self.timeline_panel.add_track_requested.connect(self.add_timeline_track)
+
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setInterval(30_000)
         self._autosave_timer.timeout.connect(self._autosave_project)
@@ -172,6 +184,14 @@ class MainWindow(QMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.script_dock)
+
+        self.timeline_dock = QDockWidget("タイムライン", self)
+        self.timeline_dock.setWidget(self.timeline_panel)
+        self.timeline_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.timeline_dock)
 
         # 台本エディタの「台本プレビュー再生」で進む現在のセリフを
         # 映像プレビューへテロップとしてオーバーレイ表示する。
@@ -244,10 +264,27 @@ class MainWindow(QMainWindow):
         open_script_action = file_menu.addAction("台本を開く...")
         open_script_action.triggered.connect(self.open_script)
 
+        timeline_menu = menu_bar.addMenu("タイムライン")
+        add_clip_action = timeline_menu.addAction("プロジェクト素材からクリップを追加...")
+        add_clip_action.triggered.connect(self.add_timeline_clip_from_assets)
+        add_track_action = timeline_menu.addAction("トラックを追加...")
+        add_track_action.triggered.connect(self.add_timeline_track)
+        timeline_menu.addSeparator()
+        split_clip_action = timeline_menu.addAction("選択クリップを再生ヘッド位置で分割")
+        split_clip_action.triggered.connect(self.timeline_panel.split_selected_at_playhead)
+        delete_clip_action = timeline_menu.addAction("選択クリップを削除")
+        delete_clip_action.triggered.connect(self.timeline_panel.delete_selected)
+        timeline_menu.addSeparator()
+        caption_action = timeline_menu.addAction("台本字幕をタイムラインに配置")
+        caption_action.triggered.connect(self.add_script_lines_to_timeline)
+
         view_menu = menu_bar.addMenu("表示")
         toggle_script_action = self.script_dock.toggleViewAction()
         toggle_script_action.setText("台本エディタを表示")
         view_menu.addAction(toggle_script_action)
+        toggle_timeline_action = self.timeline_dock.toggleViewAction()
+        toggle_timeline_action.setText("タイムラインを表示")
+        view_menu.addAction(toggle_timeline_action)
 
         if self.preview_3d_dock is not None:
             # モード切り替えUI(基礎): 2Dキャラクター(常時表示)に加えて、
@@ -282,6 +319,7 @@ class MainWindow(QMainWindow):
 
     def _sync_project_script(self) -> None:
         self._project.script = self.script_panel.model.to_dict()
+        self._project.timeline = self.timeline_panel.model.to_dict()
 
     def save_project(self) -> bool:
         if self._project.file_path is None:
@@ -374,9 +412,12 @@ class MainWindow(QMainWindow):
         if not self.script_panel.load_script_data(ScriptModel().to_dict()):
             self._discard_pending = False
             return
+        self._active_timeline_video_clip_id = None
         self.preview_panel.close_video()
+        self.timeline_panel.set_model(TimelineModel.create_default())
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
+        self._project.timeline = self.timeline_panel.model.to_dict()
         if self._discard_pending:
             self._remove_autosave_file(previous_autosave)
         self._discard_pending = False
@@ -400,6 +441,7 @@ class MainWindow(QMainWindow):
             return
         try:
             project, recovered = ProjectDocument.load_with_recovery(path)
+            timeline_model = TimelineModel.from_dict(project.timeline)
             if recovered:
                 answer = QMessageBox.question(
                     self,
@@ -410,8 +452,9 @@ class MainWindow(QMainWindow):
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     project = ProjectDocument.load(path)
+                    timeline_model = TimelineModel.from_dict(project.timeline)
                     recovered = False
-        except (OSError, ProjectError) as exc:
+        except (OSError, ProjectError, TimelineError) as exc:
             self._discard_pending = False
             QMessageBox.critical(self, "プロジェクト読み込みエラー", str(exc))
             return
@@ -420,6 +463,8 @@ class MainWindow(QMainWindow):
             self._discard_pending = False
             return
 
+        self._active_timeline_video_clip_id = None
+        self.timeline_panel.set_model(timeline_model)
         self._project = project
         self._project_dirty = recovered
         if self._discard_pending:
@@ -440,6 +485,31 @@ class MainWindow(QMainWindow):
                 active_video_path = self._project.resolve_asset(active_video)
                 if active_video_path.is_file():
                     self.preview_panel.open_video(str(active_video_path))
+                    saved_clip_id = self._project.settings.get("active_timeline_video_clip_id")
+                    active_clip = (
+                        timeline_model.get_clip(saved_clip_id)
+                        if isinstance(saved_clip_id, str)
+                        else None
+                    )
+                    if (
+                        active_clip is None
+                        or active_clip.kind != "video"
+                        or active_clip.asset_id != active_video.id
+                    ):
+                        active_clip = next(
+                            (
+                                clip for clip in sorted(
+                                    timeline_model.clips, key=lambda item: (item.start, item.id)
+                                )
+                                if clip.kind == "video" and clip.asset_id == active_video.id
+                            ),
+                            None,
+                        )
+                    if active_clip is not None:
+                        self._active_timeline_video_clip_id = active_clip.id
+                        self.timeline_panel.canvas._set_selected_clip(active_clip.id)
+                        self.timeline_panel.set_playhead(active_clip.start)
+                        self.preview_panel.seek_to(active_clip.source_in)
             except (OSError, ProjectError):
                 pass
 
@@ -453,6 +523,284 @@ class MainWindow(QMainWindow):
                 f"次の素材を見つけられませんでした。素材一覧からパスを確認してください。\n{names}{extra}",
             )
         self.statusBar().showMessage(f"開きました: {path}", 5000)
+
+    def _video_clip_at(self, timeline_seconds: float):
+        candidates = [
+            clip for clip in self.timeline_panel.model.clips
+            if clip.kind == "video" and clip.start <= timeline_seconds < clip.end
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda clip: (clip.start, clip.id))
+
+    def _on_video_time_changed(self, source_seconds: float) -> None:
+        """Map source-media timestamps back to the selected clip's timeline time."""
+        clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
+        if clip is not None and clip.kind == "video":
+            self.timeline_panel.set_playhead(clip.timeline_time_at(source_seconds))
+        else:
+            self.timeline_panel.set_playhead(source_seconds)
+
+    def _on_timeline_playhead_changed(self, seconds: float) -> None:
+        """Seek source media using the clip mapping at the requested timeline time."""
+        clip = self._video_clip_at(seconds)
+        if clip is None or clip.asset_id is None:
+            self._active_timeline_video_clip_id = None
+            if self._project.settings.pop("active_timeline_video_clip_id", None) is not None:
+                self._mark_project_dirty()
+            self.preview_panel.seek_to(seconds)
+            return
+
+        asset = self._project.get_asset(clip.asset_id)
+        if asset is None:
+            self.statusBar().showMessage("動画クリップの素材が見つかりません", 5000)
+            return
+        try:
+            path = self._project.resolve_asset(asset)
+            if not path.is_file():
+                self.statusBar().showMessage(f"動画素材が見つかりません: {path}", 6000)
+                return
+            active_id = self._project.settings.get("active_video_asset_id")
+            if self.preview_panel.decoder is None or active_id != asset.id:
+                if not self.preview_panel.open_video(str(path)):
+                    self.statusBar().showMessage(f"動画を開けませんでした: {path}", 6000)
+                    return
+                self._project.settings["active_video_asset_id"] = asset.id
+                self._mark_project_dirty()
+            self._active_timeline_video_clip_id = clip.id
+            if self._project.settings.get("active_timeline_video_clip_id") != clip.id:
+                self._project.settings["active_timeline_video_clip_id"] = clip.id
+                self._mark_project_dirty()
+            self.preview_panel.seek_to(clip.source_time_at(seconds))
+        except (OSError, ProjectError) as exc:
+            QMessageBox.warning(self, "動画クリップを開けません", str(exc))
+
+    def _on_timeline_selection_changed(self, clip_id: str) -> None:
+        """Selecting a video clip loads its source and jumps to its timeline start."""
+        if not clip_id:
+            return
+        clip = self.timeline_panel.model.get_clip(clip_id)
+        if clip is None or clip.kind != "video" or clip.asset_id is None:
+            return
+        asset = self._project.get_asset(clip.asset_id)
+        if asset is None:
+            self.statusBar().showMessage("選択した動画素材がプロジェクトに見つかりません", 5000)
+            return
+        try:
+            path = self._project.resolve_asset(asset)
+            if not path.is_file():
+                self.statusBar().showMessage(f"動画素材が見つかりません: {path}", 6000)
+                return
+            active_id = self._project.settings.get("active_video_asset_id")
+            if self.preview_panel.decoder is None or active_id != asset.id:
+                if not self.preview_panel.open_video(str(path)):
+                    self.statusBar().showMessage(f"動画を開けませんでした: {path}", 6000)
+                    return
+                self._project.settings["active_video_asset_id"] = asset.id
+                self._mark_project_dirty()
+            self._active_timeline_video_clip_id = clip.id
+            if self._project.settings.get("active_timeline_video_clip_id") != clip.id:
+                self._project.settings["active_timeline_video_clip_id"] = clip.id
+                self._mark_project_dirty()
+            self.timeline_panel.set_playhead(clip.start)
+            self.preview_panel.seek_to(clip.source_in)
+        except (OSError, ProjectError) as exc:
+            QMessageBox.warning(self, "動画クリップを開けません", str(exc))
+
+    def _on_timeline_edited(self) -> None:
+        self._mark_project_dirty()
+        clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
+        if clip is None:
+            self._active_timeline_video_clip_id = None
+            self._project.settings.pop("active_timeline_video_clip_id", None)
+            return
+        if clip.kind == "video" and self.preview_panel.decoder is not None:
+            self.preview_panel.seek_to(clip.source_time_at(self.timeline_panel.playhead_seconds))
+
+    def add_script_lines_to_timeline(self) -> None:
+        """Place script lines on an overlay track as linked text clips.
+
+        Existing clips are kept in place; only script lines without a timeline
+        clip are appended, making the operation safe to repeat.
+        """
+        lines = self.script_panel.model.lines
+        if not lines:
+            QMessageBox.information(self, "台本字幕", "台本にセリフがありません。")
+            return
+        existing_ids = {
+            clip.script_line_id
+            for clip in self.timeline_panel.model.clips
+            if clip.script_line_id is not None
+        }
+        tracks = [
+            track for track in self.timeline_panel.model.tracks
+            if track.kind == "overlay" and not track.locked
+        ]
+        if not tracks:
+            index = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == "overlay"
+            )
+            tracks = [
+                self.timeline_panel.model.add_track(f"Overlay {index}", "overlay")
+            ]
+
+        elapsed = 0.0
+        added = 0
+        for line in lines:
+            duration = max(0.05, float(line.duration_sec))
+            if line.line_id not in existing_ids:
+                try:
+                    self.timeline_panel.model.add_clip(
+                        tracks[0].id,
+                        "text",
+                        line.text or "（空の字幕）",
+                        duration,
+                        start=elapsed,
+                        script_line_id=line.line_id,
+                    )
+                except TimelineError as exc:
+                    QMessageBox.warning(self, "台本字幕を配置できません", str(exc))
+                    break
+                added += 1
+            elapsed += duration
+
+        if added:
+            self.timeline_panel.refresh()
+            self._mark_project_dirty()
+            self.statusBar().showMessage(f"台本字幕を {added} 件タイムラインに配置しました", 5000)
+        else:
+            QMessageBox.information(self, "台本字幕", "すべてのセリフはすでに配置済みです。")
+
+    def add_timeline_track(self) -> None:
+        labels = ["Video", "Audio", "Overlay", "Motion", "Other"]
+        kinds = ["video", "audio", "overlay", "motion", "other"]
+        selected, accepted = QInputDialog.getItem(
+            self, "トラックを追加", "トラック種別:", labels, 0, False
+        )
+        if not accepted:
+            return
+        kind = kinds[labels.index(selected)]
+        count = 1 + sum(1 for track in self.timeline_panel.model.tracks if track.kind == kind)
+        name = f"{selected} {count}"
+        try:
+            self.timeline_panel.model.add_track(name, kind)
+            self.timeline_panel.refresh()
+            self._mark_project_dirty()
+        except TimelineError as exc:
+            QMessageBox.warning(self, "トラック追加エラー", str(exc))
+
+    def _asset_default_duration(self, asset) -> float:
+        if asset.kind == "video":
+            active_id = self._project.settings.get("active_video_asset_id")
+            if active_id == asset.id and self.preview_panel.decoder is not None:
+                duration = float(self.preview_panel.decoder.duration_seconds)
+                if duration >= 0.05:
+                    return duration
+            return 5.0
+        if asset.kind == "audio":
+            try:
+                path = self._project.resolve_asset(asset)
+                with wave.open(str(path), "rb") as audio:
+                    duration = audio.getnframes() / float(audio.getframerate())
+                if duration >= 0.05:
+                    return duration
+            except (OSError, wave.Error, ProjectError, ZeroDivisionError):
+                pass
+            return 5.0
+        return 5.0
+
+    def add_timeline_clip_from_assets(self) -> None:
+        available = [
+            asset for asset in self._project.assets
+            if asset.kind in {"video", "audio", "image", "character", "other"}
+        ]
+        if not available:
+            QMessageBox.information(
+                self, "クリップを追加", "先に「ファイル → 素材をプロジェクトに追加」で素材を登録してください。"
+            )
+            return
+        labels = [
+            f"{index + 1}. {asset.name} [{asset.kind}]"
+            for index, asset in enumerate(available)
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self, "クリップを追加", "使用する素材:", labels, 0, False
+        )
+        if not accepted:
+            return
+        asset = available[labels.index(selected)]
+
+        mapping = {
+            "video": ("video", "video"),
+            "audio": ("audio", "audio"),
+            "image": ("image", "overlay"),
+            "character": ("character", "overlay"),
+            "other": ("other", "other"),
+        }
+        clip_kind, track_kind = mapping[asset.kind]
+        tracks = [
+            track for track in self.timeline_panel.model.tracks
+            if track.kind == track_kind and not track.locked
+        ]
+        if not tracks:
+            default_name = {
+                "video": "Video 1",
+                "audio": "Audio 1",
+                "overlay": "Overlay 1",
+                "other": "Other 1",
+            }.get(track_kind, f"{track_kind.title()} 1")
+            suffix = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
+            )
+            tracks = [self.timeline_panel.model.add_track(f"{default_name.split()[0]} {suffix}", track_kind)]
+
+        default_duration = self._asset_default_duration(asset)
+        duration, accepted = QInputDialog.getDouble(
+            self,
+            "クリップの長さ",
+            "タイムライン上の長さ (秒):",
+            default_duration,
+            0.05,
+            3600.0,
+            2,
+        )
+        if not accepted:
+            return
+
+        try:
+            self.timeline_panel.add_clip(
+                tracks[0].id,
+                clip_kind,
+                asset.name,
+                duration,
+                asset_id=asset.id,
+            )
+        except TimelineError as exc:
+            QMessageBox.warning(self, "クリップ追加エラー", str(exc))
+            return
+        self.statusBar().showMessage(f"タイムラインに追加しました: {asset.name}", 5000)
+
+    def _add_video_asset_to_timeline(self, asset) -> None:
+        if any(clip.asset_id == asset.id for clip in self.timeline_panel.model.clips):
+            return
+        tracks = [
+            track for track in self.timeline_panel.model.tracks
+            if track.kind == "video" and not track.locked
+        ]
+        if not tracks:
+            tracks = [self.timeline_panel.model.add_track("Video 1", "video")]
+        duration = self._asset_default_duration(asset)
+        try:
+            self.timeline_panel.add_clip(
+                tracks[0].id,
+                "video",
+                asset.name,
+                duration,
+                start=0.0,
+                asset_id=asset.id,
+            )
+        except TimelineError as exc:
+            QMessageBox.warning(self, "タイムライン追加エラー", str(exc))
 
     def _guess_asset_kind(self, path: str) -> str:
         extension = Path(path).suffix.lower()
@@ -597,6 +945,7 @@ class MainWindow(QMainWindow):
             asset = self._register_linked_asset(path, "video")
             if asset is not None:
                 self._project.settings["active_video_asset_id"] = asset.id
+                self._add_video_asset_to_timeline(asset)
                 self._mark_project_dirty()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
@@ -625,6 +974,7 @@ def main() -> int:
             asset = window._register_linked_asset(startup_video, "video")
             if asset is not None:
                 window._project.settings["active_video_asset_id"] = asset.id
+                window._add_video_asset_to_timeline(asset)
                 window._mark_project_dirty()
 
     window.show()

@@ -40,6 +40,12 @@ def _default_script() -> dict[str, Any]:
     return {"speakers": [], "lines": []}
 
 
+def _default_timeline() -> dict[str, Any]:
+    # TimelineModel supplies the standard video/audio/overlay/motion tracks
+    # when this empty legacy/default payload is first opened.
+    return {}
+
+
 def _safe_asset_name(name: str) -> str:
     """Keep the original extension while removing path/control characters."""
     base = Path(name).name
@@ -106,6 +112,7 @@ class ProjectDocument:
     name: str = "Untitled"
     script: dict[str, Any] = field(default_factory=_default_script)
     assets: list[ProjectAsset] = field(default_factory=list)
+    timeline: dict[str, Any] = field(default_factory=_default_timeline)
     settings: dict[str, Any] = field(default_factory=dict)
     project_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: str = field(default_factory=_utc_now)
@@ -155,6 +162,9 @@ class ProjectDocument:
         settings = data.get("settings", {})
         if not isinstance(settings, dict):
             raise ProjectError("Project settings must be an object")
+        timeline = data.get("timeline", _default_timeline())
+        if not isinstance(timeline, dict):
+            raise ProjectError("Project timeline must be an object")
         raw_assets = data.get("assets", [])
         if not isinstance(raw_assets, list):
             raise ProjectError("Project assets must be an array")
@@ -163,6 +173,7 @@ class ProjectDocument:
             name=str(data.get("name") or "Untitled"),
             script=script,
             assets=[ProjectAsset.from_dict(item) for item in raw_assets],
+            timeline=timeline,
             settings=settings,
             project_id=str(data.get("project_id") or uuid.uuid4().hex),
             created_at=str(data.get("created_at") or _utc_now()),
@@ -217,6 +228,7 @@ class ProjectDocument:
             "updated_at": self.updated_at,
             "script": self.script,
             "assets": [asset.to_dict() for asset in self.assets],
+            "timeline": self.timeline,
             "settings": self.settings,
         }
 
@@ -536,6 +548,13 @@ class ProjectDocument:
         asset = self.get_asset(asset_id)
         if asset is None:
             return False
+        clips = self.timeline.get("clips", []) if isinstance(self.timeline, dict) else []
+        if isinstance(clips, list) and any(
+            isinstance(clip, dict) and clip.get("asset_id") == asset_id for clip in clips
+        ):
+            raise ProjectError(
+                "Cannot remove an asset referenced by a timeline clip; remove the clip first"
+            )
         if delete_managed_file and asset.managed:
             resolved = self._resolve_managed_asset_path(asset)
             if resolved.exists():

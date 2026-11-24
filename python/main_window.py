@@ -19,7 +19,7 @@ import sys
 import wave
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, Signal, QTimer
+from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRunnable, QThreadPool
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,11 @@ from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
 from timeline_model import TimelineError, TimelineModel
 from timeline_audio import TimelineAudioPlayback
+from timeline_audio_render import (
+    AudioRenderError,
+    render_timeline_audio,
+    timeline_audio_clips,
+)
 
 try:
     from osc_receiver import OscMocapReceiver
@@ -147,6 +152,40 @@ def _default_vose_lib_path() -> str | None:
     return None
 
 
+class _TimelineAudioRenderSignals(QObject):
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class _TimelineAudioRenderTask(QRunnable):
+    """Run a mixdown against a frozen timeline/asset-path snapshot off the GUI thread."""
+
+    def __init__(
+        self,
+        timeline_payload: dict,
+        asset_paths: dict[str, str],
+        output_path: str,
+    ) -> None:
+        super().__init__()
+        self.timeline_payload = timeline_payload
+        self.asset_paths = asset_paths
+        self.output_path = output_path
+        self.signals = _TimelineAudioRenderSignals()
+
+    def run(self) -> None:
+        try:
+            model = TimelineModel.from_dict(self.timeline_payload)
+            result = render_timeline_audio(
+                model,
+                lambda clip: self.asset_paths[clip.id],
+                self.output_path,
+            )
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+            return
+        self.signals.finished.emit(result)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -178,6 +217,10 @@ class MainWindow(QMainWindow):
         self.timeline_audio.error.connect(
             lambda message: self.statusBar().showMessage(message, 8000)
         )
+        self._audio_render_pool = QThreadPool(self)
+        self._audio_render_pool.setMaxThreadCount(1)
+        self._audio_render_task: _TimelineAudioRenderTask | None = None
+        self._export_audio_mix_action = None
         self._active_timeline_video_clip_id: str | None = None
         self._timeline_playback_requested = False
         self._timeline_playback_transition = False
@@ -299,6 +342,9 @@ class MainWindow(QMainWindow):
         timeline_menu.addSeparator()
         caption_action = timeline_menu.addAction("台本字幕をタイムラインに配置")
         caption_action.triggered.connect(self.add_script_lines_to_timeline)
+        timeline_menu.addSeparator()
+        self._export_audio_mix_action = timeline_menu.addAction("音声ミックスをWAVに書き出す...")
+        self._export_audio_mix_action.triggered.connect(self.export_timeline_audio_mix)
 
         view_menu = menu_bar.addMenu("表示")
         toggle_script_action = self.script_dock.toggleViewAction()
@@ -1090,6 +1136,108 @@ class MainWindow(QMainWindow):
         if clip.kind == "video" and self.preview_panel.decoder is not None:
             self.preview_panel.seek_to(clip.source_time_at(self.timeline_panel.playhead_seconds))
 
+
+    def export_timeline_audio_mix(self) -> None:
+        """Export all enabled, unmuted timeline audio/voice clips as one WAV mix."""
+        if self._audio_render_task is not None:
+            self.statusBar().showMessage("音声ミックスを書き出し中です", 5000)
+            return
+
+        try:
+            snapshot = TimelineModel.from_dict(self.timeline_panel.model.to_dict())
+        except TimelineError as exc:
+            QMessageBox.warning(self, "音声ミックス", f"タイムラインを読み込めません: {exc}")
+            return
+
+        clips = timeline_audio_clips(snapshot)
+        if not clips:
+            QMessageBox.information(
+                self, "音声ミックス", "有効でミュートされていない音声クリップがありません。"
+            )
+            return
+
+        if self._project.file_path is not None:
+            suggested = self._project.file_path.with_name(
+                f"{self._project.file_path.stem}_audio_mix.wav"
+            )
+        else:
+            suggested = Path.home() / "aural_audio_mix.wav"
+        output_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "タイムライン音声ミックスを書き出す",
+            str(suggested),
+            "WAV音声 (*.wav)",
+        )
+        if not output_name:
+            return
+
+        output_path = Path(output_name).expanduser()
+        if output_path.suffix.lower() != ".wav":
+            QMessageBox.warning(self, "音声ミックス", "出力先は .wav ファイルを指定してください。")
+            return
+
+        try:
+            asset_paths = {
+                clip.id: str(self._resolve_timeline_audio_asset(clip).expanduser().resolve())
+                for clip in clips
+            }
+        except (OSError, ProjectError, ValueError) as exc:
+            QMessageBox.warning(self, "音声素材エラー", str(exc))
+            return
+
+        resolved_output = output_path.resolve()
+        if resolved_output in {Path(path).resolve() for path in asset_paths.values()}:
+            QMessageBox.warning(
+                self,
+                "音声ミックス",
+                "元の音声素材を上書きすることはできません。別の出力先を指定してください。",
+            )
+            return
+
+        task = _TimelineAudioRenderTask(
+            snapshot.to_dict(),
+            asset_paths,
+            str(output_path),
+        )
+        task.signals.finished.connect(self._on_timeline_audio_render_finished)
+        task.signals.failed.connect(self._on_timeline_audio_render_failed)
+        self._audio_render_task = task
+        if self._export_audio_mix_action is not None:
+            self._export_audio_mix_action.setEnabled(False)
+        self.statusBar().showMessage(
+            f"音声ミックスを書き出しています... ({len(clips)} クリップ)", 0
+        )
+        self._audio_render_pool.start(task)
+
+    def _finish_timeline_audio_render(self) -> None:
+        self._audio_render_task = None
+        if self._export_audio_mix_action is not None:
+            self._export_audio_mix_action.setEnabled(True)
+
+    def _on_timeline_audio_render_finished(self, result) -> None:
+        self._finish_timeline_audio_render()
+        summary = (
+            f"音声ミックスを書き出しました。\\n"
+            f"保存先: {result.output_path}\\n"
+            f"長さ: {result.duration_seconds:.2f} 秒 / "
+            f"サンプルレート: {result.sample_rate} Hz / "
+            f"クリップ数: {result.audio_clip_count}"
+        )
+        if result.clipped_sample_count:
+            summary += (
+                f"\\n\\n注意: {result.clipped_sample_count:,} サンプルが上限を超えたため、"
+                "出力時にクリップされました。クリップ音量を下げて再書き出ししてください。"
+            )
+            QMessageBox.warning(self, "音声ミックス完了（音割れの可能性）", summary)
+        else:
+            QMessageBox.information(self, "音声ミックス完了", summary)
+        self.statusBar().showMessage(f"WAVを書き出しました: {result.output_path}", 8000)
+
+    def _on_timeline_audio_render_failed(self, message: str) -> None:
+        self._finish_timeline_audio_render()
+        QMessageBox.critical(self, "音声ミックスに失敗しました", message)
+        self.statusBar().showMessage("音声ミックスの書き出しに失敗しました", 8000)
+
     def add_script_lines_to_timeline(self) -> None:
         """Place script lines on an overlay track as linked text clips.
 
@@ -1444,6 +1592,14 @@ class MainWindow(QMainWindow):
                 self._mark_project_dirty()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qtの命名規則に合わせる)
+        if self._audio_render_task is not None:
+            QMessageBox.information(
+                self,
+                "音声ミックスを書き出し中",
+                "書き出しが完了するまでアプリを閉じることはできません。",
+            )
+            event.ignore()
+            return
         if not self._confirm_discard_changes():
             event.ignore()
             return

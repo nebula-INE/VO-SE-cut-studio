@@ -196,7 +196,7 @@ def test_mixdown_supports_pcm24_input(tmp_path):
         output.writeframes(bytes(payload))
 
     model, track = _audio_timeline()
-    model.add_clip(track.id, "audio", "24-bit", 0.0005, asset_id="pcm24")
+    model.add_clip(track.id, "audio", "24-bit", 0.05, asset_id="pcm24")
     result = render_timeline_audio(
         model, lambda _clip: path, tmp_path / "pcm24-mix.wav", sample_rate=8_000
     )

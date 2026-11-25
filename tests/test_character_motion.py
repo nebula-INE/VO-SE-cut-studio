@@ -81,3 +81,45 @@ def test_motion_file_size_limit_is_enforced(tmp_path):
     path.write_text(" " * (10 * 1024 * 1024 + 1), encoding="utf-8")
     with pytest.raises(CharacterMotionError, match="too large"):
         load_motion_file(path)
+
+
+def test_save_motion_file_round_trips_and_adds_a_terminal_newline(tmp_path):
+    from character_motion import save_motion_file
+
+    path = save_motion_file(
+        tmp_path / "recorded.motion.json",
+        [
+            {
+                "time": 0.0,
+                "head": {"x": 0.0, "y": 0.0, "tilt_deg": 0.0},
+                "bones": {"LeftUpperArm": [0.0, 0.0, 0.0, 1.0]},
+            },
+            {
+                "time": 0.5,
+                "head": {"x": 0.1, "y": 0.0, "tilt_deg": 12.0},
+                "vowels": {"A": 0.8},
+                "bones": {"LeftUpperArm": [0.0, 0.0, 0.5, 0.8660254]},
+            },
+        ],
+    )
+
+    raw = path.read_bytes()
+    assert raw.endswith(b"\n")
+    assert json.loads(raw)["format"] == "aural-motion"
+    assert load_motion_file(path)[-1]["head"]["tilt_deg"] == pytest.approx(12.0)
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_save_motion_file_rejects_duplicate_times_and_invalid_values(tmp_path):
+    from character_motion import save_motion_file
+
+    with pytest.raises(CharacterMotionError, match="unique"):
+        save_motion_file(
+            tmp_path / "duplicate.motion.json",
+            [{"time": 0.0}, {"time": 0.0}],
+        )
+    with pytest.raises(CharacterMotionError, match="zero quaternion"):
+        save_motion_file(
+            tmp_path / "invalid.motion.json",
+            [{"time": 0.0, "bones": {"LeftUpperArm": [0.0, 0.0, 0.0, 0.0]}}],
+        )

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -230,3 +232,57 @@ def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str,
 
 def motion_duration(keyframes: list[dict[str, Any]]) -> float:
     return float(keyframes[-1]["time"]) if keyframes else 0.0
+
+
+
+def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
+    """Validate and atomically save an aural-motion v1 JSON file."""
+    destination = Path(path).expanduser()
+    if not isinstance(keyframes, list) or not keyframes:
+        raise CharacterMotionError("Motion recording must contain at least one keyframe")
+    normalized = [
+        _normalize_keyframe(frame, index)
+        for index, frame in enumerate(keyframes)
+    ]
+    normalized.sort(key=lambda frame: frame["time"])
+    times = [frame["time"] for frame in normalized]
+    if len(times) != len(set(times)):
+        raise CharacterMotionError("Motion keyframe times must be unique")
+    payload = {
+        "format": MOTION_FORMAT,
+        "version": MOTION_VERSION,
+        "keyframes": normalized,
+    }
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_MOTION_FILE_BYTES:
+        raise CharacterMotionError(
+            f"Motion file is too large ({len(encoded)} bytes; limit {MAX_MOTION_FILE_BYTES})"
+        )
+
+    temporary_name: str | None = None
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+    except OSError as exc:
+        if temporary_name:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise CharacterMotionError(
+            f"Could not save motion file {destination}: {exc}"
+        ) from exc
+    return destination

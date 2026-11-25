@@ -54,7 +54,8 @@ from timeline_video_render import (
     timeline_motion_clips,
     timeline_video_clips,
 )
-from character_motion import save_motion_file
+from character_motion import CharacterMotionError, load_motion_file, sample_motion, save_motion_file
+from timeline_motion_preview import TimelineMotionPreviewError, timeline_motion_state_at
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
     MAX_RECORDING_SECONDS,
@@ -388,6 +389,16 @@ class MainWindow(QMainWindow):
         self._timeline_playback_transition = False
         self._timeline_playback_generation = 0
         self._pending_timeline_clip_id: str | None = None
+        self._live_motion_state = {
+            "mouth_openness": 0.0,
+            "head": {"x": 0.0, "y": 0.0, "tilt_deg": 0.0},
+            "blend_shapes": {},
+            "vowels": {},
+            "bones": {},
+        }
+        self._timeline_motion_preview_active = False
+        self._motion_preview_cache: dict[str, tuple[tuple[int, int], list[dict]]] = {}
+        self._last_motion_preview_error: str | None = None
         self.timeline_panel.changed.connect(self._on_timeline_edited)
         self.timeline_panel.playhead_changed.connect(self._on_timeline_playhead_changed)
         self.timeline_panel.playback_toggle_requested.connect(self.toggle_timeline_playback)
@@ -423,9 +434,9 @@ class MainWindow(QMainWindow):
         # 台本エディタの「台本プレビュー再生」で進む現在のセリフを
         # 映像プレビューへテロップとしてオーバーレイ表示する。
         self.script_panel.telop_changed.connect(self.preview_panel.set_telop)
-        self.script_panel.mouth_openness_changed.connect(self.preview_panel.set_mouth_openness)
+        self.script_panel.mouth_openness_changed.connect(self._on_live_motion_mouth_openness)
         # 音声解析(フォルマント)で推定した母音の口形も反映する。
-        self.script_panel.vowels_changed.connect(self.preview_panel.set_vowels)
+        self.script_panel.vowels_changed.connect(self._on_live_motion_vowels)
 
         # モーションキャプチャ(VMCプロトコル/OSC・WebSocket)受信。スマホ等の
         # トラッキングアプリから頭の位置・傾きをリアルタイムに受け取り、
@@ -433,9 +444,9 @@ class MainWindow(QMainWindow):
         self.mocap_bridge: _MocapBridge | None = None
         if _MOCAP_AVAILABLE:
             self.mocap_bridge = _MocapBridge(osc_port=39539, websocket_port=39540)
-            self.mocap_bridge.head_transform_received.connect(self.preview_panel.set_head_transform)
-            self.mocap_bridge.blend_shapes_received.connect(self.preview_panel.set_blend_shapes)
-            self.mocap_bridge.bone_transform_received.connect(self.preview_panel.set_bone_transform)
+            self.mocap_bridge.head_transform_received.connect(self._on_live_motion_head)
+            self.mocap_bridge.blend_shapes_received.connect(self._on_live_motion_blend_shapes)
+            self.mocap_bridge.bone_transform_received.connect(self._on_live_motion_bone)
             self.mocap_bridge.head_transform_received.connect(self._record_motion_head)
             self.mocap_bridge.blend_shapes_received.connect(self._record_motion_blend_shapes)
             self.mocap_bridge.bone_transform_received.connect(self._record_motion_bone)
@@ -875,6 +886,8 @@ class MainWindow(QMainWindow):
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
         self._project.timeline = self.timeline_panel.model.to_dict()
+        self._motion_preview_cache.clear()
+        self._update_timeline_motion_preview(self.timeline_panel.playhead_seconds)
         if self._discard_pending:
             self._remove_autosave_file(previous_autosave)
         self._discard_pending = False
@@ -925,6 +938,8 @@ class MainWindow(QMainWindow):
         self.timeline_panel.set_model(timeline_model)
         self.timeline_audio.prune_removed_clips()
         self._project = project
+        self._motion_preview_cache.clear()
+        self._update_timeline_motion_preview(self.timeline_panel.playhead_seconds)
         self._project_dirty = recovered
         self._restore_generated_audio_assets()
         if self._discard_pending:
@@ -986,6 +1001,85 @@ class MainWindow(QMainWindow):
             )
         self.statusBar().showMessage(f"開きました: {path}", 5000)
 
+    def _apply_live_motion_preview(self) -> None:
+        if not self._timeline_motion_preview_active:
+            self.preview_panel.set_motion_state(self._live_motion_state)
+
+    def _on_live_motion_head(self, x: float, y: float, tilt_deg: float) -> None:
+        self._live_motion_state["head"] = {
+            "x": float(x),
+            "y": float(y),
+            "tilt_deg": float(tilt_deg),
+        }
+        self._apply_live_motion_preview()
+
+    def _on_live_motion_blend_shapes(self, values: dict) -> None:
+        self._live_motion_state["blend_shapes"] = dict(values)
+        self._apply_live_motion_preview()
+
+    def _on_live_motion_bone(
+        self, name: str, qx: float, qy: float, qz: float, qw: float
+    ) -> None:
+        self._live_motion_state["bones"][name] = (
+            float(qx), float(qy), float(qz), float(qw)
+        )
+        self._apply_live_motion_preview()
+
+    def _on_live_motion_mouth_openness(self, value: float) -> None:
+        self._live_motion_state["mouth_openness"] = max(0.0, min(1.0, float(value)))
+        self._apply_live_motion_preview()
+
+    def _on_live_motion_vowels(self, values: dict) -> None:
+        self._live_motion_state["vowels"] = dict(values)
+        self._apply_live_motion_preview()
+
+    def _load_timeline_motion_keyframes(self, clip) -> list[dict]:
+        asset = self._project.get_asset(clip.asset_id or "")
+        if asset is None:
+            raise ProjectError(f"モーションクリップ「{clip.name}」の素材参照がありません")
+        path = self._project.resolve_asset(asset)
+        if not path.is_file():
+            raise ProjectError(f"モーション素材が見つかりません: {path}")
+        stat = path.stat()
+        file_signature = (stat.st_mtime_ns, stat.st_size)
+        cached = self._motion_preview_cache.get(asset.id)
+        if cached is not None and cached[0] == file_signature:
+            return cached[1]
+        keyframes = load_motion_file(path)
+        self._motion_preview_cache[asset.id] = (file_signature, keyframes)
+        return keyframes
+
+    def _update_timeline_motion_preview(self, timeline_seconds: float) -> None:
+        try:
+            state = timeline_motion_state_at(
+                self.timeline_panel.model,
+                timeline_seconds,
+                self._load_timeline_motion_keyframes,
+            )
+        except (
+            CharacterMotionError,
+            ProjectError,
+            OSError,
+            TimelineMotionPreviewError,
+        ) as exc:
+            message = str(exc)
+            if message != self._last_motion_preview_error:
+                self.statusBar().showMessage(f"モーションプレビュー: {message}", 7000)
+            self._last_motion_preview_error = message
+            state = None
+        else:
+            self._last_motion_preview_error = None
+
+        if state is None:
+            was_active = self._timeline_motion_preview_active
+            self._timeline_motion_preview_active = False
+            if was_active:
+                self.preview_panel.set_motion_state(self._live_motion_state)
+            return
+
+        self._timeline_motion_preview_active = True
+        self.preview_panel.set_motion_state(state)
+
     def _video_clip_at(self, timeline_seconds: float):
         candidates = [
             clip for clip in self.timeline_panel.model.clips
@@ -1019,6 +1113,7 @@ class MainWindow(QMainWindow):
         self._pending_timeline_clip_id = None
         self.timeline_panel.set_playback_state(True)
         self.timeline_audio.start(start_seconds)
+        self._update_timeline_motion_preview(start_seconds)
 
         clip = self._video_clip_at(start_seconds)
         if clip is not None and clip.asset_id is not None:
@@ -1036,6 +1131,7 @@ class MainWindow(QMainWindow):
         self.timeline_audio.pause()
         self.timeline_panel.set_playback_state(False)
         self.timeline_panel.set_playhead(0.0)
+        self._update_timeline_motion_preview(0.0)
         if self.preview_panel.decoder is not None:
             clip = self._video_clip_at(0.0)
             active_asset_id = self._project.settings.get("active_video_asset_id")
@@ -1051,6 +1147,7 @@ class MainWindow(QMainWindow):
         if not self._timeline_playback_requested or self.preview_panel.is_playing:
             return
         self.timeline_panel.set_playhead(seconds)
+        self._update_timeline_motion_preview(seconds)
 
         if self._pending_timeline_clip_id is None:
             clip = self._video_clip_at(seconds)
@@ -1238,7 +1335,8 @@ class MainWindow(QMainWindow):
             self._abort_timeline_video_transition(f"次の動画クリップを開けません: {exc}")
 
     def _on_timeline_playhead_changed(self, seconds: float) -> None:
-        """Seek source media using the clip mapping at the requested timeline time."""
+        """Seek source media and update timeline-driven character motion."""
+        self._update_timeline_motion_preview(seconds)
         if not self._timeline_playback_transition:
             self._timeline_playback_generation += 1
             self._pending_timeline_clip_id = None
@@ -1319,6 +1417,7 @@ class MainWindow(QMainWindow):
     def _on_timeline_edited(self) -> None:
         self._mark_project_dirty()
         self.timeline_audio.prune_removed_clips()
+        self._update_timeline_motion_preview(self.timeline_panel.playhead_seconds)
         clip = self.timeline_panel.model.get_clip(self._active_timeline_video_clip_id or "")
         if clip is None:
             self._active_timeline_video_clip_id = None

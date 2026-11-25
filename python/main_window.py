@@ -1813,12 +1813,15 @@ class MainWindow(QMainWindow):
                 clip for clip in model.clips
                 if clip.kind == "character" and clip.enabled
                 and clip.start < end and clip.end > start
+                and (track := model.get_track(clip.track_id)) is not None
+                and not track.muted and track.visible
             ]
 
             if not overlapping_characters:
                 overlay_tracks = [
                     track for track in model.tracks
-                    if track.kind == "overlay" and not track.locked
+                    if track.kind == "overlay"
+                    and not track.locked and not track.muted and track.visible
                 ]
                 if not overlay_tracks:
                     count = 1 + sum(
@@ -1837,7 +1840,8 @@ class MainWindow(QMainWindow):
 
             motion_tracks = [
                 track for track in model.tracks
-                if track.kind == "motion" and not track.locked
+                if track.kind == "motion"
+                and not track.locked and not track.muted and track.visible
             ]
             if not motion_tracks:
                 count = 1 + sum(

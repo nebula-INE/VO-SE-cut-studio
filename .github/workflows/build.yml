@@ -95,6 +95,7 @@ jobs:
             libavutil-dev \
             libavfilter-dev \
             libswscale-dev \
+            ffmpeg \
             libgl1-mesa-dev \
             libglu1-mesa-dev \
             libxcb-cursor0

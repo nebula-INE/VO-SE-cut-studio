@@ -18,6 +18,7 @@ ScriptEditorPanel は他のウィンドウに埋め込んで使う再利用可�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import uuid
@@ -326,6 +327,10 @@ class ScriptEditorPanel(QWidget):
     telop_changed = Signal(str)  # 現在アクティブなセリフのテキスト(無ければ空文字列)
     mouth_openness_changed = Signal(float)  # 現在の再生位置での口の開き具合(0.0〜1.0)
     vowels_changed = Signal(dict)  # 現在の再生位置での母音の重み({"A":..})。無音なら空dict
+    content_changed = Signal()  # プロジェクト保存対象の台本内容が変更された
+    asset_imported = Signal(str, str)  # (path, kind) -- プロジェクト素材として登録する
+    synth_audio_ready = Signal(str, str)  # (line_id, generated WAV path)
+    synth_audio_batch_finished = Signal()
 
     PLAYBACK_TICK_MS = 50
 
@@ -339,7 +344,10 @@ class ScriptEditorPanel(QWidget):
         # --- VO-SE音声合成まわりの状態 ---
         self._vose_lib_path = vose_lib_path
         self._synth_thread = None
+        self._synthesis_generation = 0
+        self._retired_synth_threads = []
         self._synth_wav_paths: dict[str, str] = {}   # line_id -> wavファイルパス
+        self._synth_input_fingerprints: dict[str, str] = {}
         self._synth_envelopes: dict[str, list] = {}  # line_id -> LipSyncFrameのリスト
         self._playback_queue: list[str] = []          # 再生待ちのline_idキュー
         self._synth_pending_count = 0
@@ -433,6 +441,9 @@ class ScriptEditorPanel(QWidget):
         self.timeline.updateGeometry()
         self.timeline.update()
         self._update_duration_label()
+        if not _VOSE_AVAILABLE:
+            self.synth_button.setEnabled(False)
+        self.content_changed.emit()
 
     def toggle_preview_playback(self) -> None:
         if self._is_previewing:
@@ -481,6 +492,8 @@ class ScriptEditorPanel(QWidget):
             QMessageBox.critical(self, "ボイスバンクの取り込みに失敗", str(e))
             return
 
+        self.asset_imported.emit(voicebank.path, "voicebank")
+
         speaker_name, ok = QInputDialog.getText(
             self, "話者を追加", f"「{voicebank.name}」を使う話者の名前:",
             text=voicebank.name,
@@ -501,24 +514,101 @@ class ScriptEditorPanel(QWidget):
 
         self.model.add_speaker(speaker_name.strip(), color, voice_source=voicebank.id)
         self.chat_input._refresh_speakers()
+        self.content_changed.emit()
         QMessageBox.information(
             self, "ボイスバンクを追加",
             f"話者「{speaker_name.strip()}」を追加しました(ボイスバンク: {voicebank.name})。",
         )
 
+    def synthesis_fingerprint(self, line_id: str) -> str:
+        """Return a stable cache key for a line's text and assigned voice source."""
+        line = next((item for item in self.model.lines if item.line_id == line_id), None)
+        if line is None:
+            return ""
+        speaker = self.model.speaker_by_name(line.speaker_name)
+        voice_source = speaker.voice_source if speaker else "openjtalk"
+        payload = f"{voice_source}\0{line.text}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def has_complete_synth_audio_cache(self) -> bool:
+        """Whether every current script line has a matching, existing WAV."""
+        return bool(self.model.lines) and all(
+            line.line_id in self._synth_wav_paths
+            and Path(self._synth_wav_paths[line.line_id]).is_file()
+            and self._synth_input_fingerprints.get(line.line_id)
+            == self.synthesis_fingerprint(line.line_id)
+            for line in self.model.lines
+        )
+
+    def set_persisted_synth_audio(
+        self, line_id: str, wav_path: str, fingerprint: str
+    ) -> bool:
+        """Restore a project-owned WAV only when its text/voice cache key matches."""
+        if not fingerprint or self.synthesis_fingerprint(line_id) != fingerprint:
+            return False
+        path = Path(wav_path).expanduser()
+        if not path.is_file():
+            return False
+        line = next((item for item in self.model.lines if item.line_id == line_id), None)
+        if line is None:
+            return False
+        try:
+            with wave.open(str(path), "rb") as audio:
+                line.actual_duration_sec = audio.getnframes() / float(audio.getframerate())
+        except (OSError, wave.Error, ZeroDivisionError):
+            return False
+        self._synth_wav_paths[line_id] = str(path.resolve())
+        self._synth_input_fingerprints[line_id] = fingerprint
+        try:
+            if extract_lipsync_frames is not None:
+                self._synth_envelopes[line_id] = extract_lipsync_frames(str(path))
+            elif extract_mouth_envelope is not None:
+                self._synth_envelopes[line_id] = extract_mouth_envelope(str(path))
+            else:
+                self._synth_envelopes[line_id] = []
+        except Exception:  # noqa: BLE001 - audio playback remains available without lip-sync data
+            self._synth_envelopes[line_id] = []
+        self.timeline.updateGeometry()
+        self.timeline.update()
+        self._update_duration_label()
+        self.synth_button.setEnabled(_VOSE_AVAILABLE or self.has_complete_synth_audio_cache())
+        if self.has_complete_synth_audio_cache():
+            self.synth_button.setToolTip("プロジェクトに保存済みの音声を再生します")
+        elif not _VOSE_AVAILABLE:
+            self.synth_button.setToolTip("vose_worker(VO-SEエンジン連携)が利用できません")
+        return True
+
     def start_voice_synthesis(self) -> None:
-        if not _VOSE_AVAILABLE:
-            QMessageBox.warning(self, "音声合成", "vose_worker(VO-SEエンジン連携)が利用できません。")
-            return
         if not self.model.lines:
             return
         if self._synth_thread is not None:
             return  # 既に合成中
 
+        # When every line has a matching project-owned WAV, replay it without
+        # requiring the synthesis engine or regenerating the audio.
+        cached = self.has_complete_synth_audio_cache()
+        if cached:
+            self.media_player.stop()
+            self._current_playing_line_id = None
+            self._playback_queue = [line.line_id for line in self.model.lines]
+            self._synth_pending_count = 0
+            self.synth_status_label.setText("保存済み音声を再生中")
+            self._play_next_in_queue()
+            return
+
+        if not _VOSE_AVAILABLE:
+            self.synth_button.setEnabled(False)
+            QMessageBox.warning(self, "音声合成", "vose_worker(VO-SEエンジン連携)が利用できません。")
+            return
+
+        self._synthesis_generation += 1
+        generation = self._synthesis_generation
         self.synth_button.setEnabled(False)
         self.synth_status_label.setText("合成中... (0/{})".format(len(self.model.lines)))
 
         self._synth_wav_paths.clear()
+        self._synth_input_fingerprints.clear()
+        self._synth_envelopes.clear()
         self._playback_queue.clear()
         self._synth_pending_count = len(self.model.lines)
         for line in self.model.lines:
@@ -532,10 +622,68 @@ class ScriptEditorPanel(QWidget):
         self._synth_thread = start_synthesis(
             self._vose_lib_path,
             lines,
-            on_line_ready=self._on_synth_line_ready,
-            on_line_failed=self._on_synth_line_failed,
-            on_all_finished=self._on_synth_all_finished,
+            on_line_ready=lambda line_id, path: self._on_synth_line_ready_for_generation(
+                generation, line_id, path
+            ),
+            on_line_failed=lambda line_id, error: self._on_synth_line_failed_for_generation(
+                generation, line_id, error
+            ),
+            on_all_finished=lambda: self._on_synth_all_finished_for_generation(generation),
         )
+
+    def _on_synth_line_ready_for_generation(
+        self, generation: int, line_id: str, wav_path: str
+    ) -> None:
+        if generation != self._synthesis_generation:
+            return
+        self._on_synth_line_ready(line_id, wav_path)
+
+    def _on_synth_line_failed_for_generation(
+        self, generation: int, line_id: str, error_message: str
+    ) -> None:
+        if generation != self._synthesis_generation:
+            return
+        self._on_synth_line_failed(line_id, error_message)
+
+    def _on_synth_all_finished_for_generation(self, generation: int) -> None:
+        if generation != self._synthesis_generation:
+            return
+        self._on_synth_all_finished()
+
+    def _release_retired_synth_thread(self, thread) -> None:
+        if thread in self._retired_synth_threads:
+            self._retired_synth_threads.remove(thread)
+            thread.deleteLater()
+
+    def cancel_synthesis(self) -> None:
+        """Invalidate callbacks and request cancellation of the current worker.
+
+        Synthesis functions are not forcibly interrupted mid-WAV. The worker is
+        retained until its QThread.finished signal so replacing a project never
+        destroys a running QThread or allows stale callbacks into the new script.
+        """
+        self._synthesis_generation += 1
+        thread = self._synth_thread
+        if thread is not None:
+            self._synth_thread = None
+            thread.cancel()
+            self._retired_synth_threads.append(thread)
+            thread.finished.connect(
+                lambda worker=thread: self._release_retired_synth_thread(worker)
+            )
+
+        self.media_player.stop()
+        self._synth_wav_paths.clear()
+        self._synth_input_fingerprints.clear()
+        self._synth_envelopes.clear()
+        self._playback_queue.clear()
+        self._synth_pending_count = 0
+        self._current_playing_line_id = None
+        self.synth_status_label.setText("")
+        self.synth_button.setEnabled(_VOSE_AVAILABLE)
+        self.telop_changed.emit("")
+        self.mouth_openness_changed.emit(0.0)
+        self.vowels_changed.emit({})
 
     def _on_synth_line_ready(self, line_id: str, wav_path: str) -> None:
         self._synth_wav_paths[line_id] = wav_path
@@ -548,9 +696,11 @@ class ScriptEditorPanel(QWidget):
                     line.actual_duration_sec = w.getnframes() / float(w.getframerate())
             except Exception as e:  # noqa: BLE001 (読めなければ概算値のまま続行)
                 print(f"[尺] WAVの長さを取得できません line_id={line_id}: {e}")
+            self._synth_input_fingerprints[line_id] = self.synthesis_fingerprint(line_id)
             self.timeline.updateGeometry()
             self.timeline.update()
             self._update_duration_label()
+            self.content_changed.emit()
 
         try:
             # 音量+母音(フォルマント)。母音解析に失敗しても音量だけで続行する。
@@ -562,6 +712,8 @@ class ScriptEditorPanel(QWidget):
         except Exception as e:  # noqa: BLE001 (エンベロープが無くてもテロップ/音声再生は継続する)
             print(f"[リップシンク] エンベロープ抽出に失敗 line_id={line_id}: {e}")
             self._synth_envelopes[line_id] = []
+        if line is not None:
+            self.synth_audio_ready.emit(line_id, wav_path)
         self._playback_queue.append(line_id)
         self._synth_pending_count -= 1
         self.synth_status_label.setText(
@@ -583,6 +735,7 @@ class ScriptEditorPanel(QWidget):
             # 必ずwait()でOSスレッドの終了を確定させる(Qtの既定動作)。
             self._synth_thread.wait()
         self._synth_thread = None
+        self.synth_audio_batch_finished.emit()
 
     def _play_next_in_queue(self) -> None:
         if not self._playback_queue:
@@ -621,6 +774,7 @@ class ScriptEditorPanel(QWidget):
                 self._play_next_in_queue()
             else:
                 self._current_playing_line_id = None
+                self.synth_status_label.setText("")
                 self.telop_changed.emit("")  # 再生キューを使い切ったらテロップを消す
                 self.mouth_openness_changed.emit(0.0)  # 口を閉じる
                 self.vowels_changed.emit({})
@@ -681,14 +835,34 @@ class ScriptEditorPanel(QWidget):
         self.load_script_from_path(path)
 
     def load_script_from_path(self, path: str) -> bool:
-        self.stop_preview_playback()
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-            self.model = ScriptModel.from_dict(data)
+        except Exception as e:  # noqa: BLE001 (UIへのエラー表示が目的)
+            QMessageBox.critical(self, "読み込みエラー", str(e))
+            return False
+        if not self.load_script_data(data):
+            return False
+        self.content_changed.emit()
+        return True
+
+    def load_script_data(self, data: dict) -> bool:
+        """既存UIを再構築しながら台本データをロードする。
+
+        プロジェクトファイルからの読み込みにも使うため、ファイル選択UIは
+        呼び出し元に任せる。読込自体ではcontent_changedを発火しない。
+        """
+        try:
+            if not isinstance(data, dict):
+                raise ValueError("台本データはJSONオブジェクトである必要があります")
+            new_model = ScriptModel.from_dict(data)
         except Exception as e:  # noqa: BLE001 (UIへのエラー表示が目的)
             QMessageBox.critical(self, "読み込みエラー", str(e))
             return False
 
+        self.stop_preview_playback()
+        self.cancel_synthesis()
+        self.media_player.stop()
+        self.model = new_model
         self.transcript.clear()
         self.transcript.model = self.model
         for line in self.model.lines:
@@ -701,16 +875,25 @@ class ScriptEditorPanel(QWidget):
         self.timeline.updateGeometry()
         self.timeline.update()
         self._update_duration_label()
+        self._synth_wav_paths.clear()
+        self._synth_input_fingerprints.clear()
+        self._synth_envelopes.clear()
+        self._playback_queue.clear()
+        self._current_playing_line_id = None
+        self.synth_button.setEnabled(_VOSE_AVAILABLE)
+        self.telop_changed.emit("")
+        self.mouth_openness_changed.emit(0.0)
+        self.vowels_changed.emit({})
         return True
 
     def cleanup(self) -> None:
         """ウィンドウが閉じられる際に呼び出す。"""
         self.playback_timer.stop()
         self.media_player.stop()
-        if self._synth_thread is not None:
-            self._synth_thread.cancel()
-            self._synth_thread.quit()
-            self._synth_thread.wait(3000)
+        self.cancel_synthesis()
+        for thread in list(self._retired_synth_threads):
+            thread.wait()
+        self._retired_synth_threads.clear()
 
 
 class ScriptEditorWindow(QMainWindow):

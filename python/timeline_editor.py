@@ -1,9 +1,10 @@
 """Qt timeline editor with non-destructive move, trim, split and delete operations."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QSize, QRectF, Signal
+from PySide6.QtCore import Qt, QSize, QRectF, Signal, QSignalBlocker
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -310,11 +311,15 @@ class TimelineEditorWidget(QWidget):
     playhead_changed = Signal(float)
     add_clip_requested = Signal()
     add_track_requested = Signal()
+    playback_toggle_requested = Signal()
+    playback_stop_requested = Signal()
 
     def __init__(self, model: TimelineModel | None = None) -> None:
         super().__init__()
         self.model = model or TimelineModel.create_default()
 
+        self.playback_button = QPushButton("▶ 再生")
+        self.stop_playback_button = QPushButton("■ 停止")
         self.add_clip_button = QPushButton("＋ クリップ")
         self.add_track_button = QPushButton("＋ トラック")
         self.split_button = QPushButton("分割")
@@ -324,7 +329,32 @@ class TimelineEditorWidget(QWidget):
         self.selection_label = QLabel("クリップ未選択")
         self.status_label = QLabel("ドラッグ: 移動／左右端: トリム")
 
+        self.volume_spinbox = QDoubleSpinBox()
+        self.volume_spinbox.setRange(0.0, 100.0)
+        self.volume_spinbox.setDecimals(0)
+        self.volume_spinbox.setSingleStep(5.0)
+        self.volume_spinbox.setSuffix("%")
+        self.volume_spinbox.setFixedWidth(76)
+        self.fade_in_spinbox = QDoubleSpinBox()
+        self.fade_in_spinbox.setRange(0.0, 600.0)
+        self.fade_in_spinbox.setDecimals(2)
+        self.fade_in_spinbox.setSingleStep(0.05)
+        self.fade_in_spinbox.setSuffix(" s")
+        self.fade_in_spinbox.setFixedWidth(82)
+        self.fade_out_spinbox = QDoubleSpinBox()
+        self.fade_out_spinbox.setRange(0.0, 600.0)
+        self.fade_out_spinbox.setDecimals(2)
+        self.fade_out_spinbox.setSingleStep(0.05)
+        self.fade_out_spinbox.setSuffix(" s")
+        self.fade_out_spinbox.setFixedWidth(82)
+        for control in (self.volume_spinbox, self.fade_in_spinbox, self.fade_out_spinbox):
+            control.setEnabled(False)
+            control.setKeyboardTracking(False)
+
         toolbar = QHBoxLayout()
+        toolbar.addWidget(self.playback_button)
+        toolbar.addWidget(self.stop_playback_button)
+        toolbar.addSpacing(8)
         toolbar.addWidget(self.add_clip_button)
         toolbar.addWidget(self.add_track_button)
         toolbar.addSpacing(8)
@@ -345,20 +375,36 @@ class TimelineEditorWidget(QWidget):
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: #151a22; }")
 
+        audio_controls = QHBoxLayout()
+        audio_controls.addWidget(QLabel("選択音声クリップ"))
+        audio_controls.addWidget(QLabel("音量"))
+        audio_controls.addWidget(self.volume_spinbox)
+        audio_controls.addWidget(QLabel("フェードイン"))
+        audio_controls.addWidget(self.fade_in_spinbox)
+        audio_controls.addWidget(QLabel("フェードアウト"))
+        audio_controls.addWidget(self.fade_out_spinbox)
+        audio_controls.addStretch(1)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addLayout(toolbar)
+        layout.addLayout(audio_controls)
         layout.addWidget(self.scroll, stretch=1)
 
-        self.canvas.changed.connect(self.changed.emit)
+        self.canvas.changed.connect(self._on_canvas_changed)
         self.canvas.playhead_changed.connect(self._on_playhead_changed)
         self.canvas.selection_changed.connect(self._on_selection_changed)
+        self.playback_button.clicked.connect(self.playback_toggle_requested.emit)
+        self.stop_playback_button.clicked.connect(self.playback_stop_requested.emit)
         self.add_clip_button.clicked.connect(self.add_clip_requested.emit)
         self.add_track_button.clicked.connect(self.add_track_requested.emit)
         self.split_button.clicked.connect(self.split_selected_at_playhead)
         self.delete_button.clicked.connect(self.delete_selected)
         self.zoom_out_button.clicked.connect(lambda: self._zoom(-12))
         self.zoom_in_button.clicked.connect(lambda: self._zoom(12))
+        self.volume_spinbox.valueChanged.connect(self._apply_audio_controls)
+        self.fade_in_spinbox.valueChanged.connect(self._apply_audio_controls)
+        self.fade_out_spinbox.valueChanged.connect(self._apply_audio_controls)
 
     @property
     def selected_clip_id(self) -> str | None:
@@ -377,6 +423,7 @@ class TimelineEditorWidget(QWidget):
             self.selection_label.setText("クリップ未選択")
             self.split_button.setEnabled(False)
             self.delete_button.setEnabled(False)
+            self._sync_audio_controls(None, False)
             return
         track = self.model.get_track(clip.track_id)
         locked = track is None or track.locked
@@ -384,6 +431,52 @@ class TimelineEditorWidget(QWidget):
         self.selection_label.setText(f"{clip.name}  {clip.start:.2f}s–{clip.end:.2f}s{suffix}")
         self.split_button.setEnabled(not locked)
         self.delete_button.setEnabled(not locked)
+        self._sync_audio_controls(
+            clip,
+            not locked and track is not None and track.kind == "audio"
+            and clip.kind in {"audio", "voice"},
+        )
+
+    def _sync_audio_controls(self, clip: TimelineClip | None, enabled: bool) -> None:
+        controls = (self.volume_spinbox, self.fade_in_spinbox, self.fade_out_spinbox)
+        blockers = [QSignalBlocker(control) for control in controls]
+        for control in controls:
+            control.setEnabled(enabled)
+        if clip is None:
+            self.volume_spinbox.setValue(100.0)
+            self.fade_in_spinbox.setMaximum(600.0)
+            self.fade_out_spinbox.setMaximum(600.0)
+            self.fade_in_spinbox.setValue(0.0)
+            self.fade_out_spinbox.setValue(0.0)
+        else:
+            self.volume_spinbox.setValue(clip.volume * 100.0)
+            self.fade_in_spinbox.setMaximum(clip.duration)
+            self.fade_out_spinbox.setMaximum(clip.duration)
+            self.fade_in_spinbox.setValue(clip.fade_in)
+            self.fade_out_spinbox.setValue(clip.fade_out)
+        del blockers
+
+    def _apply_audio_controls(self, _value: float = 0.0) -> None:
+        clip = self.model.get_clip(self.selected_clip_id or "")
+        if clip is None or not self.volume_spinbox.isEnabled():
+            return
+        try:
+            self.model.set_audio_properties(
+                clip.id,
+                volume=self.volume_spinbox.value() / 100.0,
+                fade_in=self.fade_in_spinbox.value(),
+                fade_out=self.fade_out_spinbox.value(),
+            )
+        except TimelineError as exc:
+            self.status_label.setText(str(exc))
+            self._on_selection_changed(clip.id)
+            return
+        self.canvas.update()
+        self.changed.emit()
+
+    def _on_canvas_changed(self) -> None:
+        self._on_selection_changed(self.selected_clip_id or "")
+        self.changed.emit()
 
     def _zoom(self, delta: int) -> None:
         self.canvas.pixels_per_second = min(180, max(30, self.canvas.pixels_per_second + delta))
@@ -400,6 +493,9 @@ class TimelineEditorWidget(QWidget):
 
     def set_playhead(self, seconds: float) -> None:
         self.canvas.set_playhead(seconds)
+
+    def set_playback_state(self, playing: bool) -> None:
+        self.playback_button.setText("Ⅱ 一時停止" if playing else "▶ 再生")
 
     def split_selected_at_playhead(self) -> None:
         clip_id = self.selected_clip_id

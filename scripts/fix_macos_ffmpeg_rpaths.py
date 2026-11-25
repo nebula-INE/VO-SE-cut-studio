@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Isolate PyInstaller's Homebrew dylibs from PySide6's private Qt libraries.
+"""Isolate only aural_engine's FFmpeg dependency closure on macOS.
 
-PyInstaller may flatten CMake/Homebrew dependencies into Contents/Frameworks.
-Qt's own FFmpeg libraries live below PySide6/Qt/lib and can have identical
-basenames but different ABIs. Move the top-level external dylib set into a
-private subdirectory, copy the direct FFmpeg libraries from Homebrew when a
-basename was deduplicated, and rewrite consumers to explicit @loader_path loads.
+PySide6 bundles its own Qt and Shiboken dylibs in the Frameworks tree. Moving
+all top-level dylibs breaks those packages because their extensions expect
+sibling libraries at the original locations. This script instead builds a
+private dependency closure starting at aural_engine's FFmpeg load commands,
+copies only that closure to AxralNative/, and rewrites only the native engine
+and its private dependencies to use @loader_path.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import sys
 from pathlib import Path
 
 PRIVATE_DIR = "AxralNative"
-FFMPEG_PATTERNS = ("libav*.dylib", "libsw*.dylib")
+FFMPEG_PREFIXES = ("libav", "libsw")
 
 
 def run(command: list[str]) -> str:
@@ -47,51 +48,152 @@ def dependency_paths(binary: Path) -> list[str]:
     return dependencies
 
 
+def candidate_for_dependency(
+    dependency: str,
+    *,
+    binary: Path,
+    frameworks: Path,
+    private_dir: Path,
+    ffmpeg_lib_dir: Path,
+) -> Path | None:
+    """Resolve an install name to an available local or Homebrew dylib."""
+    basename = Path(dependency).name
+    if not basename or basename in {".", ".."}:
+        return None
+
+    candidates: list[Path] = []
+    if dependency.startswith("@loader_path/"):
+        candidates.append(binary.parent / dependency.removeprefix("@loader_path/"))
+    elif dependency.startswith("@executable_path/"):
+        candidates.append(
+            binary.parents[2] / "MacOS" / dependency.removeprefix("@executable_path/")
+        )
+    elif dependency.startswith("@rpath/"):
+        candidates.extend((
+            private_dir / basename,
+            ffmpeg_lib_dir / basename,
+            frameworks / basename,
+        ))
+    elif dependency.startswith("/"):
+        candidates.append(Path(dependency))
+        candidates.extend((
+            ffmpeg_lib_dir / basename,
+            frameworks / basename,
+        ))
+    else:
+        candidates.extend((
+            private_dir / basename,
+            ffmpeg_lib_dir / basename,
+            frameworks / basename,
+        ))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def copy_library(source: Path, destination: Path) -> bool:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        return False
+    shutil.copy2(source.resolve(), destination)
+    print(f"[macos-native] Isolated {destination.name}")
+    return True
+
+
+def collect_ffmpeg_dependency_closure(
+    engine_extensions: list[Path],
+    frameworks: Path,
+    private_dir: Path,
+    ffmpeg_lib_dir: Path,
+) -> set[str]:
+    """Copy FFmpeg roots and their transitive non-system dependencies."""
+    if not ffmpeg_lib_dir.is_dir():
+        raise RuntimeError(
+            f"Homebrew FFmpeg library directory was not found: {ffmpeg_lib_dir}. "
+            "Set AXRAL_FFMPEG_LIB_DIR to the FFmpeg formula's lib directory."
+        )
+
+    pending: list[Path] = []
+    moved_names: set[str] = set()
+
+    for extension in engine_extensions:
+        for dependency in dependency_paths(extension):
+            basename = Path(dependency).name
+            if not basename.startswith(FFMPEG_PREFIXES):
+                continue
+            source = candidate_for_dependency(
+                dependency,
+                binary=extension,
+                frameworks=frameworks,
+                private_dir=private_dir,
+                ffmpeg_lib_dir=ffmpeg_lib_dir,
+            )
+            if source is None:
+                raise RuntimeError(
+                    f"Could not resolve FFmpeg dependency {dependency} "
+                    f"from {extension.name}"
+                )
+            destination = private_dir / basename
+            copy_library(source, destination)
+            if basename not in moved_names:
+                moved_names.add(basename)
+                pending.append(destination)
+
+    if not moved_names:
+        raise RuntimeError("aural_engine has no direct FFmpeg dylib dependencies")
+
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        current_name = current.name
+        if current_name in visited:
+            continue
+        visited.add(current_name)
+
+        for dependency in dependency_paths(current):
+            basename = Path(dependency).name
+            if (
+                not basename
+                or basename in {".", ".."}
+                or dependency.startswith(("/System/Library/", "/usr/lib/"))
+                or basename in moved_names
+            ):
+                continue
+
+            source = candidate_for_dependency(
+                dependency,
+                binary=current,
+                frameworks=frameworks,
+                private_dir=private_dir,
+                ffmpeg_lib_dir=ffmpeg_lib_dir,
+            )
+            if source is None:
+                # Keep non-FFmpeg system and Qt-managed dependencies at their
+                # original locations. Only copy load commands that resolve to
+                # a concrete library staged by PyInstaller or Homebrew.
+                continue
+
+            destination = private_dir / basename
+            if copy_library(source, destination):
+                pending.append(destination)
+            moved_names.add(basename)
+
+    return moved_names
+
+
 def install_change(binary: Path, old: str, new: str) -> None:
     if old != new:
         run(["install_name_tool", "-change", old, new, str(binary)])
         print(f"[macos-native] {binary.name}: {old} -> {new}")
 
 
-def copy_homebrew_ffmpeg_libraries(private_dir: Path, source_dir: Path) -> None:
-    if not source_dir.is_dir():
-        raise RuntimeError(
-            f"Homebrew FFmpeg library directory was not found: {source_dir}. "
-            "Set AXRAL_FFMPEG_LIB_DIR to the FFmpeg formula's lib directory."
-        )
-    for pattern in FFMPEG_PATTERNS:
-        for source in sorted(source_dir.glob(pattern)):
-            if not source.is_file():
-                continue
-            destination = private_dir / source.name
-            # Prefer the exact Homebrew FFmpeg binary even if PyInstaller
-            # staged a same-named Qt-private library in the top-level bundle.
-            shutil.copy2(source.resolve(), destination)
-            print(f"[macos-native] Added Homebrew library: {destination.name}")
-
-
-def move_top_level_dylibs(frameworks: Path, private_dir: Path) -> set[str]:
-    private_dir.mkdir(parents=True, exist_ok=True)
-    moved: set[str] = set()
-    for source in sorted(frameworks.iterdir()):
-        if not source.is_file() or source.suffix.lower() != ".dylib":
-            continue
-        destination = private_dir / source.name
-        if destination.exists():
-            source.unlink()
-        else:
-            # Resolve symlinks before moving: Homebrew and PyInstaller may stage
-            # versioned dylib symlinks whose relative targets change after a move.
-            shutil.copy2(source.resolve(), destination)
-            source.unlink()
-        moved.add(destination.name)
-        print(f"[macos-native] Isolated {destination.name}")
-    return moved
-
-
-def patch_moved_library_dependencies(private_dir: Path, moved_names: set[str]) -> int:
+def patch_private_dependencies(private_dir: Path, moved_names: set[str]) -> int:
     changed = 0
-    for binary in sorted(private_dir.glob("*.dylib")):
+    for binary in sorted(private_dir.iterdir()):
+        if not binary.is_file() or binary.suffix.lower() != ".dylib":
+            continue
         for dependency in dependency_paths(binary):
             basename = Path(dependency).name
             if basename in moved_names:
@@ -100,34 +202,19 @@ def patch_moved_library_dependencies(private_dir: Path, moved_names: set[str]) -
     return changed
 
 
-def patch_framework_consumers(frameworks: Path, moved_names: set[str]) -> int:
+def patch_engine_extensions(
+    engine_extensions: list[Path],
+    moved_names: set[str],
+) -> int:
     changed = 0
-    for binary in sorted(frameworks.iterdir()):
-        if not binary.is_file() or binary.suffix.lower() not in {".so", ".dylib"}:
-            continue
-        for dependency in dependency_paths(binary):
-            basename = Path(dependency).name
-            if basename in moved_names:
-                install_change(binary, dependency, f"@loader_path/{PRIVATE_DIR}/{basename}")
-                changed += 1
-    return changed
-
-
-def patch_app_executable(app_bundle: Path, moved_names: set[str]) -> int:
-    macos_dir = app_bundle / "Contents" / "MacOS"
-    changed = 0
-    if not macos_dir.is_dir():
-        return changed
-    for binary in sorted(macos_dir.iterdir()):
-        if not binary.is_file():
-            continue
+    for binary in engine_extensions:
         for dependency in dependency_paths(binary):
             basename = Path(dependency).name
             if basename in moved_names:
                 install_change(
                     binary,
                     dependency,
-                    f"@loader_path/../Frameworks/{PRIVATE_DIR}/{basename}",
+                    f"@loader_path/{PRIVATE_DIR}/{basename}",
                 )
                 changed += 1
     return changed
@@ -139,16 +226,21 @@ def patch_bundle(app_bundle: Path, ffmpeg_lib_dir: Path) -> int:
     if not frameworks.is_dir():
         raise RuntimeError(f"PyInstaller Frameworks directory is missing: {frameworks}")
 
-    private_dir = frameworks / PRIVATE_DIR
-    moved_names = move_top_level_dylibs(frameworks, private_dir)
-    copy_homebrew_ffmpeg_libraries(private_dir, ffmpeg_lib_dir)
-    # Include copied FFmpeg dylibs even if PyInstaller had deduplicated them
-    # against Qt's private libraries and therefore did not stage them at root.
-    moved_names.update(path.name for path in private_dir.glob("*.dylib"))
+    engine_extensions = sorted(frameworks.glob("aural_engine*.so"))
+    if not engine_extensions:
+        raise RuntimeError(
+            f"aural_engine extension was not found at the Frameworks root: {frameworks}"
+        )
 
-    changes = patch_moved_library_dependencies(private_dir, moved_names)
-    changes += patch_framework_consumers(frameworks, moved_names)
-    changes += patch_app_executable(app_bundle, moved_names)
+    private_dir = frameworks / PRIVATE_DIR
+    moved_names = collect_ffmpeg_dependency_closure(
+        engine_extensions,
+        frameworks,
+        private_dir,
+        ffmpeg_lib_dir,
+    )
+    changes = patch_private_dependencies(private_dir, moved_names)
+    changes += patch_engine_extensions(engine_extensions, moved_names)
 
     # install_name_tool invalidates PyInstaller's ad-hoc signatures.
     run([
@@ -156,8 +248,8 @@ def patch_bundle(app_bundle: Path, ffmpeg_lib_dir: Path) -> int:
         str(app_bundle),
     ])
     print(
-        f"[macos-native] Isolated {len(moved_names)} dylib(s), rewrote "
-        f"{changes} load command(s), and re-signed {app_bundle}"
+        f"[macos-native] Isolated {len(moved_names)} FFmpeg dependency dylib(s), "
+        f"rewrote {changes} load command(s), and re-signed {app_bundle}"
     )
     return changes
 

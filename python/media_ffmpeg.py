@@ -54,6 +54,11 @@ def find_ffmpeg_executable(ffmpeg_path: str | Path | None = None) -> str:
         executable_names.append("ffmpeg")
     directories = [
         Path(sys.executable).resolve().parent,
+        *((
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+            Path("/opt/local/bin"),
+        ) if sys.platform == "darwin" else ()),
         module_root / "bin",
         module_root / "tools" / "ffmpeg" / "bin",
         module_root / "build",
@@ -280,6 +285,11 @@ def find_ffprobe_executable(
     module_root = Path(__file__).resolve().parent.parent
     directories = [
         Path(sys.executable).resolve().parent,
+        *((
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+            Path("/opt/local/bin"),
+        ) if sys.platform == "darwin" else ()),
         module_root / "bin",
         module_root / "tools" / "ffmpeg" / "bin",
         module_root / "build",

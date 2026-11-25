@@ -40,11 +40,11 @@ from vose_engine import VoseEngine
 
 def _safe_zip_member_target(destination: Path, member_name: str) -> Path:
     """Resolve a ZIP member only when both POSIX and Windows path rules keep it inside destination."""
-    if not member_name or "\\x00" in member_name:
+    if not member_name or "\x00" in member_name:
         raise ValueError(f"不正なパスを含むZIPファイルです: {member_name!r}")
 
     # ZIP uses '/', but Windows archives sometimes contain '\\'. Treat both as separators.
-    normalized = member_name.replace("\\\\", "/")
+    normalized = member_name.replace("\\", "/")
     posix_name = PurePosixPath(normalized)
     windows_name = PureWindowsPath(member_name)
     if (

@@ -18,10 +18,11 @@ def test_safe_zip_member_stays_inside_destination(tmp_path: Path) -> None:
         "../outside.wav",
         "voice/../../outside.wav",
         "../voicebank-escape/payload.wav",
-        r"voice\\..\\outside.wav",
-        r"C:\\Windows\\system.ini",
-        r"\\\\server\\share\\outside.wav",
+        r"voice\..\outside.wav",
+        r"C:\Windows\system.ini",
+        r"\\server\share\outside.wav",
         "/absolute/outside.wav",
+        "voice/\x00payload.wav",
     ],
 )
 def test_safe_zip_member_rejects_traversal_and_absolute_paths(

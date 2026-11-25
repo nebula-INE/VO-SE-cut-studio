@@ -132,8 +132,10 @@ if QDialog is not None:
             self.resize(760, 660)
             self.keyframes = normalize_motion_keyframes(keyframes)
             self._current_index = 0
+            self._displayed_scalars: dict[str, float] = {}
+            self._displayed_expressions: dict[str, float] = {}
+            self._displayed_vowels: dict[str, float] = {}
             self._displayed_bone_rolls: dict[str, float] = {}
-            self._original_bones: dict[str, list[float] | tuple[float, ...]] = {}
 
             # Keep the UI bounded even for hand-authored files with many custom
             # blend-shape names. Unlisted/custom names remain intact in the file.
@@ -163,11 +165,11 @@ if QDialog is not None:
 
             head_group = QGroupBox("頭部・口")
             head_form = QFormLayout(head_group)
-            self.time_spin = self._spin(0.0, 3600.0, 3, 0.05)
-            self.head_x_spin = self._spin(-1000.0, 1000.0, 4, 0.01)
-            self.head_y_spin = self._spin(-1000.0, 1000.0, 4, 0.01)
-            self.tilt_spin = self._spin(-3600.0, 3600.0, 2, 1.0)
-            self.mouth_spin = self._spin(0.0, 1.0, 3, 0.05)
+            self.time_spin = self._spin(0.0, 1_000_000.0, 8, 0.01)
+            self.head_x_spin = self._spin(-1_000_000.0, 1_000_000.0, 8, 0.01)
+            self.head_y_spin = self._spin(-1_000_000.0, 1_000_000.0, 8, 0.01)
+            self.tilt_spin = self._spin(-3600.0, 3600.0, 6, 0.5)
+            self.mouth_spin = self._spin(0.0, 1.0, 6, 0.05)
             head_form.addRow("時間 (秒)", self.time_spin)
             head_form.addRow("頭部 X (m)", self.head_x_spin)
             head_form.addRow("頭部 Y (m)", self.head_y_spin)
@@ -180,7 +182,7 @@ if QDialog is not None:
             expression_grid = QGridLayout(expression_group)
             self.expression_spins: dict[str, QDoubleSpinBox] = {}
             for index, name in enumerate(self.expression_names):
-                spin = self._spin(0.0, 1.0, 3, 0.05)
+                spin = self._spin(0.0, 1.0, 6, 0.05)
                 self.expression_spins[name] = spin
                 expression_grid.addWidget(QLabel(name), index, 0)
                 expression_grid.addWidget(spin, index, 1)
@@ -190,7 +192,7 @@ if QDialog is not None:
             vowel_grid = QGridLayout(vowel_group)
             self.vowel_spins: dict[str, QDoubleSpinBox] = {}
             for index, name in enumerate(EDITABLE_VOWELS):
-                spin = self._spin(0.0, 1.0, 3, 0.05)
+                spin = self._spin(0.0, 1.0, 6, 0.05)
                 self.vowel_spins[name] = spin
                 vowel_grid.addWidget(QLabel(name), index, 0)
                 vowel_grid.addWidget(spin, index, 1)
@@ -201,7 +203,7 @@ if QDialog is not None:
             arm_grid = QGridLayout(arm_group)
             self.bone_spins: dict[str, QDoubleSpinBox] = {}
             for index, name in enumerate(EDITABLE_BONES):
-                spin = self._spin(-360.0, 360.0, 2, 1.0)
+                spin = self._spin(-360.0, 360.0, 4, 1.0)
                 self.bone_spins[name] = spin
                 arm_grid.addWidget(QLabel(name), index // 2, (index % 2) * 2)
                 arm_grid.addWidget(spin, index // 2, (index % 2) * 2 + 1)
@@ -266,6 +268,13 @@ if QDialog is not None:
             self.head_y_spin.setValue(float(head.get("y", 0.0)))
             self.tilt_spin.setValue(float(head.get("tilt_deg", 0.0)))
             self.mouth_spin.setValue(float(frame.get("mouth_openness", 0.0)))
+            self._displayed_scalars = {
+                "time": float(self.time_spin.value()),
+                "head.x": float(self.head_x_spin.value()),
+                "head.y": float(self.head_y_spin.value()),
+                "head.tilt_deg": float(self.tilt_spin.value()),
+                "mouth_openness": float(self.mouth_spin.value()),
+            }
 
             shapes = frame.get("blend_shapes", {})
             canonical_shapes: dict[str, float] = {}
@@ -274,62 +283,107 @@ if QDialog is not None:
                 canonical_shapes[name] = max(
                     canonical_shapes.get(name, 0.0), float(value)
                 )
+            self._displayed_expressions = {}
             for name, spin in self.expression_spins.items():
                 spin.setValue(float(canonical_shapes.get(name, 0.0)))
+                self._displayed_expressions[name] = float(spin.value())
+
             vowels = frame.get("vowels", {})
+            self._displayed_vowels = {}
             for name, spin in self.vowel_spins.items():
                 spin.setValue(float(vowels.get(name, 0.0)))
+                self._displayed_vowels[name] = float(spin.value())
 
-            self._original_bones = copy.deepcopy(frame.get("bones", {}))
             self._displayed_bone_rolls = {}
+            bones = frame.get("bones", {})
             for name, spin in self.bone_spins.items():
-                original = self._original_bones.get(name)
+                original = bones.get(name)
                 if original is not None:
                     roll = quaternion_roll_deg(tuple(float(v) for v in original))
                 else:
                     roll = float(DEFAULT_UPPER_ARM_ROLL.get(name, 0.0))
-                self._displayed_bone_rolls[name] = roll
                 spin.setValue(roll)
+                # Compare against the value actually shown by the spin box. This
+                # avoids rewriting high-precision quaternions due to display rounding.
+                self._displayed_bone_rolls[name] = float(spin.value())
 
         def _commit_current_frame(self) -> None:
             frame = self.keyframes[self._current_index]
-            frame["time"] = float(self.time_spin.value())
-            frame["head"] = {
-                "x": float(self.head_x_spin.value()),
-                "y": float(self.head_y_spin.value()),
-                "tilt_deg": float(self.tilt_spin.value()),
-            }
-            frame["mouth_openness"] = float(self.mouth_spin.value())
+
+            current_time = float(self.time_spin.value())
+            if not math.isclose(
+                current_time, self._displayed_scalars["time"],
+                rel_tol=0.0, abs_tol=1e-12,
+            ):
+                frame["time"] = current_time
+
+            head = dict(frame.get("head", {}))
+            for key, spin in (
+                ("x", self.head_x_spin),
+                ("y", self.head_y_spin),
+                ("tilt_deg", self.tilt_spin),
+            ):
+                scalar_key = f"head.{key}"
+                current_value = float(spin.value())
+                if not math.isclose(
+                    current_value, self._displayed_scalars[scalar_key],
+                    rel_tol=0.0, abs_tol=1e-12,
+                ):
+                    head[key] = current_value
+            if head:
+                frame["head"] = head
+
+            current_mouth = float(self.mouth_spin.value())
+            if not math.isclose(
+                current_mouth, self._displayed_scalars["mouth_openness"],
+                rel_tol=0.0, abs_tol=1e-12,
+            ):
+                frame["mouth_openness"] = current_mouth
 
             shapes = dict(frame.get("blend_shapes", {}))
             previously_present = {
                 normalize_name(raw_name) for raw_name in shapes
             }
-            for raw_name in list(shapes):
-                if normalize_name(raw_name) in self.expression_spins:
-                    shapes.pop(raw_name)
             for name, spin in self.expression_spins.items():
                 value = float(spin.value())
+                if math.isclose(
+                    value, self._displayed_expressions[name],
+                    rel_tol=0.0, abs_tol=1e-12,
+                ):
+                    continue
+                for raw_name in list(shapes):
+                    if normalize_name(raw_name) == name:
+                        shapes.pop(raw_name)
                 if value > 0.0 or name in previously_present:
                     shapes[name] = value
-            frame["blend_shapes"] = shapes
+            if shapes:
+                frame["blend_shapes"] = shapes
 
             vowels = dict(frame.get("vowels", {}))
             for name, spin in self.vowel_spins.items():
                 value = float(spin.value())
+                if math.isclose(
+                    value, self._displayed_vowels[name],
+                    rel_tol=0.0, abs_tol=1e-12,
+                ):
+                    continue
                 if value > 0.0 or name in vowels:
                     vowels[name] = value
                 else:
                     vowels.pop(name, None)
-            frame["vowels"] = vowels
+            if vowels:
+                frame["vowels"] = vowels
 
             bones = dict(frame.get("bones", {}))
             for name, spin in self.bone_spins.items():
                 current_roll = float(spin.value())
-                previous_roll = self._displayed_bone_rolls.get(name, 0.0)
-                if not math.isclose(current_roll, previous_roll, abs_tol=1e-5):
+                previous_roll = self._displayed_bone_rolls[name]
+                if not math.isclose(
+                    current_roll, previous_roll, rel_tol=0.0, abs_tol=1e-12
+                ):
                     bones[name] = roll_quaternion(current_roll)
-            frame["bones"] = bones
+            if bones:
+                frame["bones"] = bones
 
         def _add_keyframe(self, time_sec: float) -> None:
             self._commit_current_frame()

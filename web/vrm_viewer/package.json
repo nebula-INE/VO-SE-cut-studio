@@ -3,7 +3,10 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "scripts": { "build": "node build.mjs" },
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node --check viewer.js && node --check build.mjs"
+  },
   "dependencies": {
     "@pixiv/three-vrm": "3.6.0",
     "three": "0.180.0"

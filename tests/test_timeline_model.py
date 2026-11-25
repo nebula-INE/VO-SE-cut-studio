@@ -249,3 +249,96 @@ def test_upsert_voice_clip_creates_missing_line_at_script_position():
     assert created.source_in == 0.0
     assert created.asset_id == "voice-asset"
     assert created.script_line_id == "line-new"
+
+
+
+def test_legacy_audio_clip_payload_defaults_to_full_volume_without_fades():
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(track.id, "audio", "legacy.wav", 2.0, asset_id="legacy")
+    payload = model.to_dict()
+    for key in ("volume", "fade_in", "fade_out"):
+        payload["clips"][0].pop(key)
+
+    restored = TimelineModel.from_dict(payload).get_clip(clip.id)
+
+    assert restored is not None
+    assert restored.volume == 1.0
+    assert restored.fade_in == 0.0
+    assert restored.fade_out == 0.0
+
+
+def test_audio_clip_volume_and_fades_round_trip_and_can_be_updated():
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(
+        track.id,
+        "voice",
+        "narration.wav",
+        5.0,
+        asset_id="voice",
+        volume=0.65,
+        fade_in=0.4,
+        fade_out=1.2,
+    )
+
+    restored = TimelineModel.from_dict(model.to_dict()).get_clip(clip.id)
+    assert restored is not None
+    assert restored.volume == 0.65
+    assert restored.fade_in == 0.4
+    assert restored.fade_out == 1.2
+
+    model.set_audio_properties(clip.id, volume=0.3, fade_in=0.8, fade_out=0.5)
+    assert clip.volume == 0.3
+    assert clip.fade_in == 0.8
+    assert clip.fade_out == 0.5
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"volume": -0.1}, "between 0 and 1"),
+        ({"volume": 1.1}, "between 0 and 1"),
+        ({"fade_in": -0.1}, "cannot be negative"),
+        ({"fade_out": 2.1}, "cannot exceed clip duration"),
+    ],
+)
+def test_audio_clip_properties_reject_invalid_values(settings, message):
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(track.id, "audio", "music.wav", 2.0, asset_id="music")
+
+    with pytest.raises(TimelineError, match=message):
+        model.set_audio_properties(clip.id, **settings)
+
+
+def test_trimming_audio_clip_clamps_fades_to_new_clip_duration():
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(
+        track.id, "audio", "music.wav", 5.0, asset_id="music",
+        fade_in=4.0, fade_out=3.0,
+    )
+
+    model.trim_clip(clip.id, duration=1.5)
+
+    assert clip.duration == 1.5
+    assert clip.fade_in == 1.5
+    assert clip.fade_out == 1.5
+
+
+def test_split_audio_clip_keeps_fades_on_outer_edges_and_volume_on_both_parts():
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(
+        track.id, "audio", "music.wav", 8.0, asset_id="music",
+        volume=0.7, fade_in=1.0, fade_out=2.0,
+    )
+
+    left, right = model.split_clip(clip.id, 4.0)
+
+    assert left.fade_in == 1.0
+    assert left.fade_out == 0.0
+    assert right.fade_in == 0.0
+    assert right.fade_out == 2.0
+    assert left.volume == right.volume == 0.7

@@ -7,7 +7,7 @@
 | OS | 配布形式 | 内容 |
 |---|---|---|
 | Windows x64 | Inno Setup `.exe` と portable `.zip` | アプリ、Python/Qt実行環境、VO-SE DLL、FFmpeg/FFprobe、必要なvcpkg DLL |
-| macOS | `.dmg` と `.zip` | アプリバンドル、Python/Qt実行環境、VO-SE dylib、FFmpeg/FFprobe |
+| macOS | `.dmg` と `.zip` | アプリバンドル、Python/Qt実行環境、VO-SE dylib。FFmpeg/FFprobeはHomebrewで別途用意 |
 | Linux x64 | `.deb` と `.tar.gz` | アプリ、Python/Qt実行環境、VO-SE共有ライブラリ、FFmpeg/FFprobe |
 
 パッケージ生成前に各OSのCIでPythonテストを実行し、生成済みアプリの `--runtime-check` を実行します。検査ではGUIを開かず、バンドル内のimport、VO-SE共有ライブラリのロードとバージョン取得、FFmpeg/FFprobeの実行ファイル検出を確認します。
@@ -27,6 +27,7 @@ python scripts/package_application.py
 ## 既知の配布上の制約
 
 - この段階ではWindowsのコード署名、macOSのDeveloper ID署名・Notarizationは行いません。署名のないmacOSアプリはGatekeeperの警告対象になる場合があります。
+- macOSはQt同梱FFmpegとの共有ライブラリ衝突を避けるため、FFmpeg/FFprobeをアプリ内にコピーしません。動画・圧縮音声機能を使う場合はHomebrewで `brew install ffmpeg` を実行してください。アプリはHomebrewの標準パス（Apple Silicon: `/opt/homebrew/bin`、Intel: `/usr/local/bin`）も検索します。
 - Windowsはx64、Linuxはx86_64/amd64でビルドします。macOSはGitHub ActionsランナーのCPUアーキテクチャに対応するビルドです。
 - Linux `.deb` はFFmpegとQtのX11/OpenGL/PulseAudio実行時ライブラリをAPT依存として宣言します。`.tar.gz` は同じOS依存関係を持つ環境向けです。
 - LinuxのPyInstaller成果物はビルド時のglibcとの互換性に依存します。配布先の最小サポートOSを確定した後、より古い基準イメージでのビルドへ固定します。

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from timeline_audio import active_audio_clips
+from timeline_audio import active_audio_clips, clip_volume_at
 from timeline_model import TimelineModel
 
 
@@ -63,3 +63,36 @@ def test_voice_clips_are_scheduled_as_audio():
     )
 
     assert active_audio_clips(model, 0.5) == [(voice, audio_track)]
+
+
+
+def test_clip_volume_at_applies_clip_gain_and_linear_edge_fades():
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(
+        track.id,
+        "audio",
+        "music.wav",
+        4.0,
+        start=2.0,
+        asset_id="music",
+        volume=0.8,
+        fade_in=1.0,
+        fade_out=2.0,
+    )
+
+    assert clip_volume_at(clip, 2.0) == 0.0
+    assert clip_volume_at(clip, 2.5) == 0.4
+    assert clip_volume_at(clip, 3.0) == 0.8
+    assert clip_volume_at(clip, 5.0) == 0.4
+    assert clip_volume_at(clip, 6.0) == 0.0
+
+
+def test_clip_volume_at_without_fades_returns_configured_gain():
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "audio")
+    clip = model.add_clip(
+        track.id, "voice", "voice.wav", 3.0, asset_id="voice", volume=0.35
+    )
+
+    assert clip_volume_at(clip, 1.5) == 0.35

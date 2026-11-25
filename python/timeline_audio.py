@@ -16,6 +16,22 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from timeline_model import TimelineClip, TimelineModel, TimelineTrack
 
 
+def clip_volume_at(clip: TimelineClip, timeline_seconds: float) -> float:
+    """Return the clip's normalized gain at a timeline position.
+
+    Fade envelopes are linear in amplitude and are evaluated against the clip's
+    current timeline bounds, so moving and trimming a clip remain non-destructive.
+    """
+    elapsed = min(max(0.0, float(timeline_seconds) - clip.start), clip.duration)
+    remaining = max(0.0, clip.duration - elapsed)
+    gain = clip.volume
+    if clip.fade_in > 0.0:
+        gain *= min(1.0, elapsed / clip.fade_in)
+    if clip.fade_out > 0.0:
+        gain *= min(1.0, remaining / clip.fade_out)
+    return min(1.0, max(0.0, gain))
+
+
 def active_audio_clips(
     model: TimelineModel, timeline_seconds: float
 ) -> list[tuple[TimelineClip, TimelineTrack]]:
@@ -190,6 +206,8 @@ class TimelineAudioPlayback(QObject):
                 entry = self._create_entry(clip, path)
 
             entry.output.setMuted(track.muted)
+            # Update gain continuously so fades are heard during preview and after seeks.
+            entry.output.setVolume(clip_volume_at(clip, timeline_seconds))
             source_position_ms = max(
                 0, int(round(clip.source_time_at(timeline_seconds) * 1000.0))
             )

@@ -110,7 +110,11 @@ class _MocapBridge(QObject):
     # 生成されるが、ロール角だけに単純化していない生のクォータニオンをそのまま運ぶ。
     blend_shapes_received = Signal(dict)  # {ブレンドシェイプ名: 0〜1}
     bone_transform_received = Signal(str, float, float, float, float)
-    # (ボーン名, qx, qy, qz, qw) -- Head以外のボーン(腕など)。2Dキャラの腕に反映する。
+    # (ボーン名, qx, qy, qz, qw) -- 既存2Dレンダラー向け。シグネチャは維持する。
+    bone_transform_3d_received = Signal(
+        str, float, float, float, float, float, float, float
+    )
+    # (ボーン名, x, y, z, qx, qy, qz, qw) -- VRM用に元の位置も保持する。
 
     def __init__(
         self,
@@ -153,6 +157,10 @@ class _MocapBridge(QObject):
 
     def _on_bone_transform(self, bone) -> None:
         self.bone_transform_received.emit(bone.name, bone.qx, bone.qy, bone.qz, bone.qw)
+        self.bone_transform_3d_received.emit(
+            bone.name, bone.x, bone.y, bone.z,
+            bone.qx, bone.qy, bone.qz, bone.qw,
+        )
 
     def start(self) -> None:
         if self._osc_receiver is not None:
@@ -478,7 +486,9 @@ class MainWindow(QMainWindow):
                 self.mocap_bridge.head_quaternion_received.connect(self.preview_3d_widget.set_head_quaternion)
                 if _VRM_VIEWER_AVAILABLE:
                     self.mocap_bridge.blend_shapes_received.connect(self.preview_3d_widget.set_blend_shapes)
-                    self.mocap_bridge.bone_transform_received.connect(self.preview_3d_widget.set_bone_transform)
+                    self.mocap_bridge.bone_transform_3d_received.connect(
+                        self.preview_3d_widget.set_bone_transform_3d
+                    )
 
         self._build_menu()
         self._refresh_window_title()

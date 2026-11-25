@@ -41,6 +41,21 @@ def _number(value: Any, label: str) -> float:
     return result
 
 
+def _validate_audio_properties(
+    volume: Any, fade_in: Any, fade_out: Any, duration: Any
+) -> None:
+    volume_value = _number(volume, "clip volume")
+    fade_in_value = _number(fade_in, "clip fade_in")
+    fade_out_value = _number(fade_out, "clip fade_out")
+    duration_value = _number(duration, "clip duration")
+    if not 0.0 <= volume_value <= 1.0:
+        raise TimelineError("Clip volume must be between 0 and 1")
+    if fade_in_value < 0.0 or fade_out_value < 0.0:
+        raise TimelineError("Clip fade durations cannot be negative")
+    if fade_in_value > duration_value or fade_out_value > duration_value:
+        raise TimelineError("Clip fade duration cannot exceed clip duration")
+
+
 @dataclass
 class TimelineTrack:
     id: str
@@ -93,6 +108,10 @@ class TimelineClip:
     asset_id: str | None = None
     script_line_id: str | None = None
     enabled: bool = True
+    # Qt QAudioOutput uses a normalized linear gain in the [0, 1] range.
+    volume: float = 1.0
+    fade_in: float = 0.0
+    fade_out: float = 0.0
 
     @property
     def end(self) -> float:
@@ -132,6 +151,9 @@ class TimelineClip:
                     str(data["script_line_id"]) if data.get("script_line_id") is not None else None
                 ),
                 enabled=data.get("enabled", True),
+                volume=_number(data.get("volume", 1.0), "clip volume"),
+                fade_in=_number(data.get("fade_in", 0.0), "clip fade_in"),
+                fade_out=_number(data.get("fade_out", 0.0), "clip fade_out"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, TimelineError):
@@ -149,6 +171,11 @@ class TimelineClip:
             raise TimelineError("Timeline clip enabled flag must be a boolean")
         if clip.asset_id is None and clip.script_line_id is None:
             raise TimelineError("Timeline clip must reference an asset or a script line")
+        _validate_audio_properties(clip.volume, clip.fade_in, clip.fade_out, clip.duration)
+        if clip.kind not in {"audio", "voice"} and (
+            clip.volume != 1.0 or clip.fade_in != 0.0 or clip.fade_out != 0.0
+        ):
+            raise TimelineError("Audio properties are only supported on audio and voice clips")
         return clip
 
     def to_dict(self) -> dict[str, Any]:
@@ -228,6 +255,11 @@ class TimelineModel:
                 )
             if clip.start < 0 or clip.source_in < 0 or clip.duration < MIN_CLIP_DURATION_SEC:
                 raise TimelineError(f"Clip has invalid timing values: {clip.id}")
+            _validate_audio_properties(clip.volume, clip.fade_in, clip.fade_out, clip.duration)
+            if clip.kind not in {"audio", "voice"} and (
+                clip.volume != 1.0 or clip.fade_in != 0.0 or clip.fade_out != 0.0
+            ):
+                raise TimelineError("Audio properties are only supported on audio and voice clips")
 
     @property
     def duration_sec(self) -> float:
@@ -291,6 +323,9 @@ class TimelineModel:
         source_in: float = 0.0,
         asset_id: str | None = None,
         script_line_id: str | None = None,
+        volume: float = 1.0,
+        fade_in: float = 0.0,
+        fade_out: float = 0.0,
     ) -> TimelineClip:
         track = self.get_track(track_id)
         if track is None:
@@ -308,6 +343,14 @@ class TimelineModel:
             raise TimelineError("Timeline clip must reference an asset or a script line")
         if not name.strip():
             raise TimelineError("Timeline clip name must not be empty")
+        volume_value = _number(volume, "clip volume")
+        fade_in_value = _number(fade_in, "clip fade_in")
+        fade_out_value = _number(fade_out, "clip fade_out")
+        _validate_audio_properties(volume_value, fade_in_value, fade_out_value, duration_value)
+        if kind not in {"audio", "voice"} and (
+            volume_value != 1.0 or fade_in_value != 0.0 or fade_out_value != 0.0
+        ):
+            raise TimelineError("Audio properties are only supported on audio and voice clips")
         clip = TimelineClip(
             id=uuid.uuid4().hex,
             track_id=track_id,
@@ -318,9 +361,52 @@ class TimelineModel:
             source_in=source_value,
             asset_id=asset_id,
             script_line_id=script_line_id,
+            volume=volume_value,
+            fade_in=fade_in_value,
+            fade_out=fade_out_value,
         )
         self.clips.append(clip)
         return clip
+
+    def upsert_voice_clip(
+        self,
+        preferred_track_id: str,
+        name: str,
+        duration: float,
+        *,
+        start: float,
+        asset_id: str,
+        script_line_id: str,
+    ) -> tuple[TimelineClip, bool]:
+        """Create a generated voice clip, but never overwrite an existing edit.
+
+        A valid generated clip may have been moved, trimmed, or renamed by the
+        user. Reopening/reconciling the script must preserve that timeline edit.
+        Only its source asset reference is refreshed if the cached WAV changed.
+        """
+        existing = next(
+            (
+                clip for clip in self.clips
+                if clip.kind == "voice" and clip.script_line_id == script_line_id
+            ),
+            None,
+        )
+        if existing is not None:
+            changed = existing.asset_id != asset_id
+            if changed:
+                existing.asset_id = asset_id
+            return existing, changed
+
+        created = self.add_clip(
+            preferred_track_id,
+            "voice",
+            name,
+            duration,
+            start=start,
+            asset_id=asset_id,
+            script_line_id=script_line_id,
+        )
+        return created, True
 
     @staticmethod
     def _snap(value: float, snap_seconds: float | None) -> float:
@@ -369,6 +455,33 @@ class TimelineModel:
             raise TimelineError(f"Clip duration must be at least {MIN_CLIP_DURATION_SEC} seconds")
         clip.source_in = new_source_in
         clip.duration = new_duration
+        # A shorter trim must not leave an invalid fade outside the new clip bounds.
+        clip.fade_in = min(clip.fade_in, new_duration)
+        clip.fade_out = min(clip.fade_out, new_duration)
+        return clip
+
+    def set_audio_properties(
+        self,
+        clip_id: str,
+        *,
+        volume: float | None = None,
+        fade_in: float | None = None,
+        fade_out: float | None = None,
+    ) -> TimelineClip:
+        """Set non-destructive preview gain and edge fades for an audio clip."""
+        clip = self.get_clip(clip_id)
+        if clip is None:
+            raise TimelineError(f"Unknown timeline clip: {clip_id}")
+        track = self.get_track(clip.track_id)
+        if clip.kind not in {"audio", "voice"} or track is None or track.kind != "audio":
+            raise TimelineError("Audio properties require an audio or voice clip on an audio track")
+        new_volume = clip.volume if volume is None else _number(volume, "clip volume")
+        new_fade_in = clip.fade_in if fade_in is None else _number(fade_in, "clip fade_in")
+        new_fade_out = clip.fade_out if fade_out is None else _number(fade_out, "clip fade_out")
+        _validate_audio_properties(new_volume, new_fade_in, new_fade_out, clip.duration)
+        clip.volume = new_volume
+        clip.fade_in = new_fade_in
+        clip.fade_out = new_fade_out
         return clip
 
     def split_clip(self, clip_id: str, at_seconds: float) -> tuple[TimelineClip, TimelineClip]:
@@ -390,8 +503,13 @@ class TimelineModel:
             asset_id=clip.asset_id,
             script_line_id=clip.script_line_id,
             enabled=clip.enabled,
+            volume=clip.volume,
+            fade_in=0.0,
+            fade_out=min(clip.fade_out, clip.duration - left_duration),
         )
         clip.duration = left_duration
+        clip.fade_in = min(clip.fade_in, left_duration)
+        clip.fade_out = 0.0
         self.clips.append(right)
         return clip, right
 

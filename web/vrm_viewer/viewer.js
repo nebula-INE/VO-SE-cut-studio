@@ -40,6 +40,7 @@ const clock = new THREE.Clock();
 
 let currentVrm = null;
 let headBasePosition = null;
+let hipsBasePosition = null;
 let previousExpressions = new Set();
 let modelLoadGeneration = 0;
 
@@ -63,6 +64,7 @@ function disposeCurrentModel() {
   VRMUtils.deepDispose(currentVrm.scene);
   currentVrm = null;
   headBasePosition = null;
+  hipsBasePosition = null;
   previousExpressions.clear();
 }
 
@@ -115,7 +117,9 @@ async function loadModel(url) {
     scene.add(vrm.scene);
     vrm.scene.updateMatrixWorld(true);
     const head = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('head');
+    const hips = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('hips');
     headBasePosition = head ? head.position.clone() : null;
+    hipsBasePosition = hips ? hips.position.clone() : null;
     fitCamera(vrm);
     setStatus('読み込み完了: ' + (vrm.meta?.name || 'VRMモデル'));
   } catch (error) {
@@ -136,7 +140,18 @@ function applyMocapState(state) {
       const [x, y, z, w] = rotation;
       if ([x, y, z, w].every(Number.isFinite)) node.quaternion.set(x, y, z, w).normalize();
     }
-    if (name === 'head' && Array.isArray(transform.position) && headBasePosition) {
+    if (name === 'hips' && Array.isArray(transform.position) && hipsBasePosition) {
+      const [x, y, z] = transform.position;
+      if ([x, y, z].every(Number.isFinite)) {
+        node.position.set(hipsBasePosition.x + x, hipsBasePosition.y + y, hipsBasePosition.z + z);
+      }
+    } else if (
+      name === 'head' &&
+      !Array.isArray(bones.hips?.position) &&
+      Array.isArray(transform.position) &&
+      headBasePosition
+    ) {
+      // Keep head-only tracking useful with sources that do not send root-bone data.
       const [x, y, z] = transform.position;
       if ([x, y, z].every(Number.isFinite)) {
         node.position.set(headBasePosition.x + x, headBasePosition.y + y, headBasePosition.z + z);

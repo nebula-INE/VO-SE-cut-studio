@@ -13,13 +13,15 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+import uuid
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import BinaryIO, Callable
 
 import numpy as np
 
+from media_ffmpeg import MediaToolError, decode_audio_clip_to_f32le
 from timeline_model import TimelineClip, TimelineModel
 
 
@@ -49,9 +51,17 @@ class _WaveSource:
 
 
 @dataclass
+class _F32Source:
+    reader: BinaryIO
+    path: Path
+    sample_rate: int
+    frame_count: int
+
+
+@dataclass
 class _PreparedClip:
     clip: TimelineClip
-    source: _WaveSource
+    source: _WaveSource | _F32Source
     destination_start: int
     frame_count: int
 
@@ -134,15 +144,43 @@ def _open_wave_source(path: Path) -> _WaveSource:
         raise
 
 
+def _open_f32_source(path: Path, sample_rate: int) -> _F32Source:
+    reader = path.open("rb")
+    frame_count = path.stat().st_size // 8
+    if frame_count <= 0:
+        reader.close()
+        raise AudioRenderError(f"Decoded audio is empty: {path}")
+    return _F32Source(
+        reader=reader,
+        path=path,
+        sample_rate=sample_rate,
+        frame_count=frame_count,
+    )
+
+
 def _read_resampled_stereo(
-    source: _WaveSource,
+    source: _WaveSource | _F32Source,
     clip: TimelineClip,
     local_output_start: int,
     output_frame_count: int,
     output_sample_rate: int,
 ) -> np.ndarray:
-    """Read a clip segment, convert mono to stereo, and linearly resample it."""
+    """Read, convert to stereo float32 and resample one clip segment."""
     if output_frame_count <= 0 or source.frame_count == 0:
+        return np.zeros((max(0, output_frame_count), 2), dtype=np.float32)
+
+    if isinstance(source, _F32Source):
+        # FFmpeg has already applied source_in and converted this clip to the
+        # output rate and stereo float32; random-access reads stay bounded.
+        source.reader.seek(local_output_start * 8)
+        raw = source.reader.read(output_frame_count * 8)
+        decoded = np.frombuffer(raw[: len(raw) - (len(raw) % 8)], dtype="<f4")
+        frames = decoded.reshape(-1, 2)
+        if len(frames) < output_frame_count:
+            padded = np.zeros((output_frame_count, 2), dtype=np.float32)
+            padded[:len(frames)] = frames
+            return padded
+        return frames.astype(np.float32, copy=False)
         return np.zeros((max(0, output_frame_count), 2), dtype=np.float32)
 
     output_indices = np.arange(
@@ -203,6 +241,7 @@ def render_timeline_audio(
     duration_seconds: float | None = None,
     block_seconds: float = 1.0,
     progress_callback: Callable[[int, int], None] | None = None,
+    ffmpeg_path: str | Path | None = None,
 ) -> AudioRenderResult:
     """Mix all enabled/unmuted timeline audio clips into a stereo PCM16 WAV.
 
@@ -253,7 +292,8 @@ def render_timeline_audio(
     temp_path: Path | None = None
     peak_level = 0.0
     clipped_sample_count = 0
-    sources: list[_WaveSource] = []
+    sources: list[_WaveSource | _F32Source] = []
+    decode_temp_dir: Path | None = None
 
     try:
         for clip in clips:
@@ -271,7 +311,30 @@ def render_timeline_audio(
                 raise AudioRenderError(
                     f"Audio asset for clip '{clip.name}' does not exist: {resolved}"
                 )
-            source = _open_wave_source(resolved)
+            try:
+                source: _WaveSource | _F32Source = _open_wave_source(resolved)
+            except AudioRenderError as wave_error:
+                try:
+                    if decode_temp_dir is None:
+                        decode_temp_dir = Path(
+                            tempfile.mkdtemp(prefix="aural-audio-decode-")
+                        )
+                    decoded_path = decode_temp_dir / f"{uuid.uuid4().hex}.f32le"
+                    decode_audio_clip_to_f32le(
+                        resolved,
+                        decoded_path,
+                        source_in=clip.source_in,
+                        duration=clip.duration,
+                        sample_rate=sample_rate,
+                        ffmpeg_path=ffmpeg_path,
+                    )
+                    source = _open_f32_source(decoded_path, sample_rate)
+                except (MediaToolError, OSError) as decode_error:
+                    raise AudioRenderError(
+                        f"「{clip.name}」の音声形式を読み込めません。"
+                        f"PCM WAV以外の形式にはFFmpegが必要です。"
+                        f"\nWAV reader: {wave_error}\nFFmpeg: {decode_error}"
+                    ) from decode_error
             sources.append(source)
             prepared.append(
                 _PreparedClip(
@@ -377,3 +440,6 @@ def render_timeline_audio(
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if decode_temp_dir is not None:
+            import shutil
+            shutil.rmtree(decode_temp_dir, ignore_errors=True)

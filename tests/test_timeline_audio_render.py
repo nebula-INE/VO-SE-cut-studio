@@ -240,3 +240,62 @@ def test_mixdown_rejects_overwriting_a_source_asset(tmp_path):
         )
 
     assert source_path.read_bytes() == original
+
+
+
+def test_mixdown_decodes_mp3_via_ffmpeg_when_wave_reader_cannot_open_it(
+    tmp_path, monkeypatch
+):
+    import timeline_audio_render
+
+    compressed = tmp_path / "voice.mp3"
+    compressed.write_bytes(b"compressed audio placeholder")
+    model, track = _audio_timeline()
+    clip = model.add_clip(
+        track.id, "voice", "MP3 voice", 0.1, asset_id="mp3", source_in=0.25
+    )
+    output = tmp_path / "mp3-mix.wav"
+    called = {}
+
+    def fake_decode(source, destination, **kwargs):
+        called["source"] = Path(source)
+        called["kwargs"] = kwargs
+        np.full(800 * 2, 0.375, dtype="<f4").tofile(destination)
+        return Path(destination)
+
+    monkeypatch.setattr(timeline_audio_render, "decode_audio_clip_to_f32le", fake_decode)
+    result = render_timeline_audio(
+        model,
+        lambda _clip: compressed,
+        output,
+        sample_rate=8_000,
+        ffmpeg_path="fake-ffmpeg",
+    )
+    _rate, mixed = _read_stereo_wav(output)
+
+    assert result.audio_clip_count == 1
+    assert called["source"] == compressed.resolve()
+    assert called["kwargs"]["source_in"] == 0.25
+    assert called["kwargs"]["duration"] == 0.1
+    assert called["kwargs"]["sample_rate"] == 8_000
+    assert called["kwargs"]["ffmpeg_path"] == "fake-ffmpeg"
+    assert np.allclose(mixed[:, 0], 0.375, atol=1 / 32768)
+
+
+def test_mixdown_keeps_pcm_wav_path_without_ffmpeg(tmp_path, monkeypatch):
+    import timeline_audio_render
+
+    source = _write_pcm_wav(tmp_path / "plain.wav", np.full(800, 0.3))
+    model, track = _audio_timeline()
+    model.add_clip(track.id, "audio", "PCM", 0.1, asset_id="pcm")
+    monkeypatch.setattr(
+        timeline_audio_render,
+        "decode_audio_clip_to_f32le",
+        lambda *args, **kwargs: pytest.fail("FFmpeg fallback should not be used"),
+    )
+
+    render_timeline_audio(
+        model, lambda _clip: source, tmp_path / "pcm-no-ffmpeg.wav", sample_rate=8_000
+    )
+    _rate, mixed = _read_stereo_wav(tmp_path / "pcm-no-ffmpeg.wav")
+    assert np.allclose(mixed[:, 0], 0.3, atol=1 / 32768)

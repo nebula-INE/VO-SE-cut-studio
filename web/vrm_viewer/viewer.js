@@ -100,6 +100,10 @@ async function loadModel(url) {
       throw new Error('VRM拡張情報が見つかりません。VRM 0.x / 1.0形式を確認してください。');
     }
     VRMUtils.rotateVRM0(vrm);
+    VRMUtils.removeUnnecessaryVertices(gltf.scene);
+    VRMUtils.combineSkeletons(gltf.scene);
+    VRMUtils.combineMorphs(vrm);
+    vrm.scene.traverse((object) => { object.frustumCulled = false; });
     disposeCurrentModel();
     currentVrm = vrm;
     scene.add(vrm.scene);

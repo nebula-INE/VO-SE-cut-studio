@@ -81,7 +81,11 @@ jobs:
             build-essential cmake pkg-config dpkg-dev ffmpeg \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev \
             libgl1-mesa-dev libglu1-mesa-dev libgl1 libegl1 libpulse0 \
-            libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0 fonts-noto-cjk
+            libnss3 libnspr4 libasound2 libcups2 libgtk-3-0 libatk1.0-0 \
+            libatk-bridge2.0-0 libatspi2.0-0 libgbm1 libdrm2 \
+            libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0 \
+            libxcb-dri3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxext6 \
+            libxfixes3 libxrandr2 libxkbfile1 libxtst6 libxshmfence1 fonts-noto-cjk
 
       - name: Configure Windows native build
         if: runner.os == 'Windows'

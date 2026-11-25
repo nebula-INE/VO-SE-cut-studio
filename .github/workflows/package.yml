@@ -1,0 +1,93 @@
+name: Package Axral Cut Studio
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AXRAL_PACKAGE_VERSION: 0.1.\${{ github.run_number }}
+
+jobs:
+  package:
+    name: Package (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+          - platform: macos
+            os: macos-latest
+          - platform: linux-x64
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python and packaging dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt pybind11 pyinstaller
+
+      - name: Install Windows native dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat
+          .\vcpkg\vcpkg install ffmpeg:x64-windows
+          "$PWD\vcpkg\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$PWD\vcpkg\installed\x64-windows\tools\ffmpeg\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$PWD\vcpkg\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          choco install innosetup --yes --no-progress
+
+      - name: Install macOS native dependencies
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config dpkg-dev ffmpeg \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libgl1 libegl1 libpulse0 \
+            libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0 fonts-noto-cjk
+
+      - name: Configure Windows native build
+        if: runner.os == 'Windows'
+        run: cmake -B build "-DCMAKE_TOOLCHAIN_FILE=./vcpkg/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Configure macOS and Linux native build
+        if: runner.os != 'Windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build native targets
+        run: cmake --build build --config Release --parallel
+
+      - name: Run regression tests
+        run: python -m pytest -q
+
+      - name: Build and smoke-test application packages
+        run: python scripts/package_application.py
+
+      - name: Upload distribution packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: AxralCutStudio-${{ matrix.platform }}-${{ github.run_number }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30

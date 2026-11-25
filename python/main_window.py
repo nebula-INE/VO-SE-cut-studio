@@ -47,8 +47,10 @@ from media_ffmpeg import (
     mux_audio_into_video,
 )
 from timeline_video_render import (
+    BUILTIN_2D_CHARACTER_ID,
     VideoRenderError,
     render_timeline_video,
+    timeline_motion_clips,
     timeline_video_clips,
 )
 
@@ -270,6 +272,7 @@ class _TimelineFullVideoExportTask(QRunnable):
         try:
             model = TimelineModel.from_dict(self.timeline_payload)
             visual_clips = timeline_video_clips(model, self.subtitle_texts)
+            motion_clips = timeline_motion_clips(model)
             audio_clips = timeline_audio_clips(model)
             duration = max(
                 [clip.end for clip in visual_clips]
@@ -287,6 +290,8 @@ class _TimelineFullVideoExportTask(QRunnable):
                     duration_seconds=duration,
                     ffmpeg_path=self.ffmpeg_path,
                     subtitle_texts=self.subtitle_texts,
+                    motion_clips=motion_clips,
+                    voice_clips=audio_clips,
                 )
                 clipped_sample_count = 0
                 peak_level = 0.0
@@ -311,6 +316,8 @@ class _TimelineFullVideoExportTask(QRunnable):
                 "output_path": str(Path(self.output_path).expanduser().resolve()),
                 "video_clip_count": video_result.video_clip_count,
                 "subtitle_clip_count": video_result.subtitle_clip_count,
+                "character_clip_count": video_result.character_clip_count,
+                "motion_clip_count": video_result.motion_clip_count,
                 "audio_clip_count": len(audio_clips),
                 "duration_seconds": video_result.duration_seconds,
                 "width": video_result.width,
@@ -1553,12 +1560,13 @@ class MainWindow(QMainWindow):
             )
             return
 
+        motion_clips = timeline_motion_clips(snapshot)
         audio_clips = timeline_audio_clips(snapshot)
-        all_clips = visual_clips + audio_clips
+        all_clips = visual_clips + audio_clips + motion_clips
         try:
             asset_paths: dict[str, str] = {}
             for clip in all_clips:
-                if clip.kind == "text":
+                if clip.kind in {"text", "character"}:
                     continue
                 asset = self._project.get_asset(clip.asset_id or "")
                 if asset is None:

@@ -4,11 +4,13 @@ import json
 import os
 import shutil
 import time
+import wave
 from pathlib import Path
 
 import pytest
 
 from project_model import ProjectDocument, ProjectError, PROJECT_FORMAT, PROJECT_SCHEMA_VERSION
+from timeline_model import TimelineModel
 
 
 def test_project_round_trip_preserves_script_and_settings(tmp_path):
@@ -292,3 +294,81 @@ def test_asset_path_with_control_characters_is_rejected(tmp_path, managed):
 
     with pytest.raises(ProjectError, match="control characters"):
         ProjectDocument.from_dict(payload, tmp_path / "invalid-path.auralproj")
+
+
+def test_asset_referenced_by_timeline_clip_cannot_be_removed(tmp_path):
+    project = ProjectDocument.create("Referenced Asset")
+    project.save(tmp_path / "referenced.auralproj")
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"voice-data")
+    asset = project.add_asset(source, "audio")
+    project.timeline["clips"] = [{
+        "id": "clip-1",
+        "asset_id": asset.id,
+        "kind": "audio",
+    }]
+
+    with pytest.raises(ProjectError, match="referenced by a timeline clip"):
+        project.remove_asset(asset.id, delete_managed_file=True)
+
+    assert project.get_asset(asset.id) is asset
+    assert source.is_file()
+
+
+def test_generated_audio_asset_mapping_survives_project_reload_and_save_as(tmp_path):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "relocated"
+    first_root.mkdir()
+    second_root.mkdir()
+
+    generated = tmp_path / "generated.wav"
+    with wave.open(str(generated), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(24_000)
+        audio.writeframes(bytes(240))
+
+    original_wav_bytes = generated.read_bytes()
+    project = ProjectDocument.create("Generated Audio")
+    project.save(first_root / "generated.auralproj")
+    asset = project.add_asset(generated, "audio", copy_into_project=True)
+    timeline = TimelineModel.create_default()
+    audio_track = next(track for track in timeline.tracks if track.kind == "audio")
+    clip = timeline.add_clip(
+        audio_track.id,
+        "voice",
+        "Narrator: persisted line",
+        1.25,
+        start=0.0,
+        asset_id=asset.id,
+        script_line_id="line-001",
+    )
+    project.timeline = timeline.to_dict()
+    project.settings["generated_audio_assets"] = {
+        "line-001": {
+            "asset_id": asset.id,
+            "fingerprint": "sha256:line-content-and-voice",
+        }
+    }
+    project.save()
+
+    loaded = ProjectDocument.load(first_root / "generated.auralproj")
+    record = loaded.settings["generated_audio_assets"]["line-001"]
+    restored_asset = loaded.get_asset(record["asset_id"])
+    assert restored_asset is not None
+    assert restored_asset.managed
+    assert loaded.resolve_asset(restored_asset).read_bytes() == original_wav_bytes
+    restored_timeline = TimelineModel.from_dict(loaded.timeline)
+    restored_clip = restored_timeline.get_clip(clip.id)
+    assert restored_clip is not None
+    assert restored_clip.kind == "voice"
+    assert restored_clip.script_line_id == "line-001"
+    assert restored_clip.asset_id == restored_asset.id
+
+    relocated_path = loaded.save(second_root / "renamed.auralproj")
+    relocated = ProjectDocument.load(relocated_path)
+    relocated_record = relocated.settings["generated_audio_assets"]["line-001"]
+    relocated_asset = relocated.get_asset(relocated_record["asset_id"])
+    assert relocated_asset is not None
+    assert relocated.resolve_asset(relocated_asset).read_bytes() == original_wav_bytes
+    assert relocated_record["fingerprint"] == "sha256:line-content-and-voice"

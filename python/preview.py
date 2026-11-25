@@ -17,7 +17,7 @@ import sys
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QRectF
+from PySide6.QtCore import Qt, QTimer, QRectF, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -242,11 +242,18 @@ class PreviewPanel(QWidget):
     open_video()を呼ぶまでプレースホルダー表示のまま待機する。
     """
 
+    current_time_changed = Signal(float)
+    playback_finished = Signal()
+    playback_state_changed = Signal(bool)
+
     def __init__(self, video_path: str | None = None) -> None:
         super().__init__()
 
         self.decoder: aural_engine.VideoDecoder | None = None
         self.is_playing = False
+        # Standalone preview keeps its historical loop behavior. Timeline
+        # playback disables looping and advances between timeline clips.
+        self.loop_playback = True
 
         self.preview = VideoPreviewWidget()
         self.play_button = QPushButton("Pause")
@@ -285,6 +292,7 @@ class PreviewPanel(QWidget):
         self.timer.start()
         self.is_playing = True
         self.play_button.setText("Pause")
+        self.playback_state_changed.emit(True)
         return True
 
     def close_video(self) -> None:
@@ -295,6 +303,36 @@ class PreviewPanel(QWidget):
             self.decoder = None
         self.is_playing = False
         self.play_button.setEnabled(False)
+        self.play_button.setText("Play")
+        self.playback_state_changed.emit(False)
+        self.current_time_changed.emit(0.0)
+
+    def seek_to(self, seconds: float) -> bool:
+        """Seek the active video preview to an absolute timeline time in seconds."""
+        if self.decoder is None:
+            return False
+        try:
+            target = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            return False
+        frame_interval = 1.0 / self.decoder.fps if self.decoder.fps > 0 else 0.0
+        duration = self.decoder.duration_seconds
+        if duration > 0:
+            target = min(target, max(0.0, duration - frame_interval))
+        if not self.decoder.seek(target):
+            return False
+
+        result = self.decoder.decode_next_frame()
+        # av_seek_frame with BACKWARD may land on an earlier keyframe. Decode
+        # forward until the first frame at or just after the requested time.
+        while result is not None and result[1] + frame_interval < target:
+            result = self.decoder.decode_next_frame()
+        if result is None:
+            return False
+        frame, pts_seconds = result
+        self.preview.show_frame(frame)
+        self.current_time_changed.emit(float(pts_seconds))
+        return True
 
     def advance_frame(self) -> None:
         if self.decoder is None:
@@ -302,25 +340,45 @@ class PreviewPanel(QWidget):
 
         result = self.decoder.decode_next_frame()
         if result is None:
-            # 終端に達したら先頭へシークしてループ再生
+            if not self.loop_playback:
+                self.timer.stop()
+                self.is_playing = False
+                self.play_button.setText("Play")
+                self.playback_finished.emit()
+                return
+            # Standalone preview retains its historical loop behavior.
             self.decoder.seek(0.0)
             result = self.decoder.decode_next_frame()
             if result is None:
                 return
 
-        frame, _pts_seconds = result
+        frame, pts_seconds = result
         self.preview.show_frame(frame)
+        self.current_time_changed.emit(float(pts_seconds))
+
+    def pause_playback(self) -> None:
+        if self.decoder is None or not self.is_playing:
+            return
+        self.timer.stop()
+        self.is_playing = False
+        self.play_button.setText("Play")
+        self.playback_state_changed.emit(False)
+
+    def resume_playback(self) -> None:
+        if self.decoder is None or self.is_playing:
+            return
+        self.timer.start()
+        self.is_playing = True
+        self.play_button.setText("Pause")
+        self.playback_state_changed.emit(True)
 
     def toggle_playback(self) -> None:
         if self.decoder is None:
             return
         if self.is_playing:
-            self.timer.stop()
-            self.play_button.setText("Play")
+            self.pause_playback()
         else:
-            self.timer.start()
-            self.play_button.setText("Pause")
-        self.is_playing = not self.is_playing
+            self.resume_playback()
 
     def set_telop(self, text: str) -> None:
         """台本エディタ側から現在のセリフのテキストを受け取り、

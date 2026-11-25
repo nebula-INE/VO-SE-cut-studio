@@ -1304,7 +1304,28 @@ class MainWindow(QMainWindow):
         if not clip_id:
             return
         clip = self.timeline_panel.model.get_clip(clip_id)
-        if clip is None or clip.kind != "video" or clip.asset_id is None:
+        if clip is None or clip.asset_id is None:
+            return
+        if clip.kind == "character" and _VRM_VIEWER_AVAILABLE:
+            character_asset = self._project.get_asset(clip.asset_id)
+            if character_asset is None:
+                self.statusBar().showMessage("キャラクター素材が見つかりません", 5000)
+                return
+            try:
+                character_path = self._project.resolve_asset(character_asset)
+                if character_path.suffix.lower() != ".vrm":
+                    self.statusBar().showMessage(
+                        "現在の3DプレビューはVRM 0.x / 1.0の .vrm 素材に対応しています",
+                        6000,
+                    )
+                    return
+                self.preview_3d_widget.load_model(str(character_path))
+                if self.preview_3d_dock is not None:
+                    self.preview_3d_dock.show()
+            except (OSError, ProjectError) as exc:
+                QMessageBox.warning(self, "VRMモデルを開けません", str(exc))
+            return
+        if clip.kind != "video":
             return
         asset = self._project.get_asset(clip.asset_id)
         if asset is None:

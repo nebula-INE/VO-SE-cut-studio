@@ -41,6 +41,7 @@ const clock = new THREE.Clock();
 let currentVrm = null;
 let headBasePosition = null;
 let previousExpressions = new Set();
+let modelLoadGeneration = 0;
 
 function setStatus(message) {
   document.title = 'AXRAL_VRM_STATUS:' + message;
@@ -87,13 +88,18 @@ function fitCamera(vrm) {
 }
 
 async function loadModel(url) {
-  if (typeof url !== 'string' || !url.startsWith('file://')) {
+  if (typeof url !== 'string' || !url.startsWith('http://127.0.0.1:')) {
     setStatus('ローカルのVRMファイルを指定してください');
     return;
   }
+  const generation = ++modelLoadGeneration;
   setStatus('VRMモデルを読み込んでいます...');
   try {
     const gltf = await loader.loadAsync(url);
+    if (generation !== modelLoadGeneration) {
+      VRMUtils.deepDispose(gltf.scene);
+      return;
+    }
     const vrm = gltf.userData.vrm;
     if (!vrm) {
       VRMUtils.deepDispose(gltf.scene);
@@ -113,6 +119,7 @@ async function loadModel(url) {
     fitCamera(vrm);
     setStatus('読み込み完了: ' + (vrm.meta?.name || 'VRMモデル'));
   } catch (error) {
+    if (generation !== modelLoadGeneration) return;
     console.error(error);
     setStatus('読み込みエラー: ' + (error?.message || error));
   }
@@ -154,6 +161,7 @@ function applyMocapState(state) {
 window.axralVrmViewer = {
   loadModel,
   closeModel() {
+    modelLoadGeneration += 1;
     disposeCurrentModel();
     setStatus('VRMモデルを閉じました');
   },

@@ -1,10 +1,16 @@
-"""Qt WebEngine host for the bundled three-vrm 3D character preview."""
+"""Qt WebEngine host for the bundled, offline three-vrm character preview."""
 from __future__ import annotations
 
+import functools
+import http.server
 import json
 import math
+import secrets
+import shutil
 import sys
+import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtWebEngineCore import QWebEngineSettings
@@ -14,12 +20,55 @@ from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QVB
 from vrm_mocap import normalize_blend_shapes, normalize_quaternion, vmc_bone_to_vrm
 
 
+class _ViewerHttpServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, directory: Path, model_route: str):
+        self.model_path: Path | None = None
+        self.model_route = model_route
+        handler = functools.partial(_ViewerRequestHandler, directory=str(directory))
+        super().__init__(("127.0.0.1", 0), handler)
+
+
+class _ViewerRequestHandler(http.server.SimpleHTTPRequestHandler):
+    server: _ViewerHttpServer
+
+    def do_GET(self) -> None:
+        if urlsplit(self.path).path == self.server.model_route:
+            source = self.server.model_path
+            if source is None or not source.is_file():
+                self.send_error(http.server.HTTPStatus.NOT_FOUND)
+                return
+            try:
+                size = source.stat().st_size
+                self.send_response(http.server.HTTPStatus.OK)
+                self.send_header("Content-Type", "model/gltf-binary")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                with source.open("rb") as stream:
+                    shutil.copyfileobj(stream, self.wfile)
+            except (OSError, BrokenPipeError):
+                return
+            return
+        super().do_GET()
+
+    def log_message(self, _format: str, *_args) -> None:
+        # Do not leak local model names or viewer traffic into application logs.
+        return
+
+
 def _viewer_index_path() -> Path | None:
-    candidates = [
-        Path(getattr(sys, "_MEIPASS", "")) / "vrm_viewer",
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    candidates = []
+    if frozen_root:
+        candidates.append(Path(frozen_root) / "vrm_viewer")
+    candidates.extend((
         Path(__file__).resolve().parent / "resources" / "vrm_viewer",
         Path(__file__).resolve().parent.parent / "web" / "vrm_viewer" / "dist",
-    ]
+    ))
     for candidate in candidates:
         index = candidate / "index.html"
         if index.is_file():
@@ -33,11 +82,14 @@ class VRMViewerWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumSize(360, 360)
-        self._pending_model_url: str | None = None
         self._page_ready = False
         self._ready_probe_count = 0
         self._bones: dict[str, dict] = {}
         self._expressions: dict[str, float] = {}
+        self._server: _ViewerHttpServer | None = None
+        self._server_thread: threading.Thread | None = None
+        self._model_route = "/__axral_model__/" + secrets.token_urlsafe(24) + ".vrm"
+        self._model_url: str | None = None
 
         self.status_label = QLabel("VRMモデルを読み込んでください")
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -55,7 +107,7 @@ class VRMViewerWidget(QWidget):
         self.web_view = QWebEngineView(self)
         settings = self.web_view.settings()
         settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, False
         )
         settings.setAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False
@@ -79,7 +131,21 @@ class VRMViewerWidget(QWidget):
             )
             self.web_view.hide()
         else:
-            self.web_view.load(QUrl.fromLocalFile(str(index)))
+            try:
+                self._server = _ViewerHttpServer(index.parent, self._model_route)
+                self._server_thread = threading.Thread(
+                    target=self._server.serve_forever,
+                    name="AxralVrmViewerHttp",
+                    daemon=True,
+                )
+                self._server_thread.start()
+                address, port = self._server.server_address
+                self._viewer_origin = f"http://{address}:{port}"
+                self.web_view.load(QUrl(self._viewer_origin + "/index.html"))
+            except OSError as exc:
+                self.status_label.setText(f"VRMビューアを起動できません: {exc}")
+                self.web_view.hide()
+                self._stop_server()
 
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(33)
@@ -93,6 +159,9 @@ class VRMViewerWidget(QWidget):
             self.load_model(path)
 
     def load_model(self, path: str | Path) -> None:
+        if self._server is None:
+            self.status_label.setText("VRMビューアHTTPサーバーが利用できません")
+            return
         source = Path(path).expanduser()
         if source.suffix.lower() != ".vrm":
             self.status_label.setText("VRM 0.x / 1.0 の .vrm ファイルを選択してください")
@@ -108,12 +177,15 @@ class VRMViewerWidget(QWidget):
             self.status_label.setText(f"VRMを開けません: {exc}")
             return
 
-        self._pending_model_url = QUrl.fromLocalFile(str(resolved)).toString()
+        self._server.model_path = resolved
+        self._model_url = self._viewer_origin + self._model_route
         self._ready_probe_count = 0
-        self._send_pending_model_when_ready()
+        self._send_model_when_ready()
 
     def close_model(self) -> None:
-        self._pending_model_url = None
+        self._model_url = None
+        if self._server is not None:
+            self._server.model_path = None
         self._bones.clear()
         self._expressions.clear()
         if self._page_ready:
@@ -141,12 +213,7 @@ class VRMViewerWidget(QWidget):
         self._bones["head"] = {"rotation": rotation, "position": position}
 
     def set_bone_transform(
-        self,
-        bone_name: str,
-        qx: float,
-        qy: float,
-        qz: float,
-        qw: float,
+        self, bone_name: str, qx: float, qy: float, qz: float, qw: float
     ) -> None:
         normalized_name = vmc_bone_to_vrm(bone_name)
         if normalized_name is None or normalized_name == "head":
@@ -169,7 +236,7 @@ class VRMViewerWidget(QWidget):
             self.status_label.setText("VRMビューアの読み込みに失敗しました")
             return
         self._ready_probe_count = 0
-        self._send_pending_model_when_ready()
+        self._send_model_when_ready()
         if not self._state_timer.isActive():
             self._state_timer.start()
 
@@ -178,8 +245,8 @@ class VRMViewerWidget(QWidget):
         if title.startswith(prefix):
             self.status_label.setText(title[len(prefix):])
 
-    def _send_pending_model_when_ready(self) -> None:
-        if not self._page_ready or not self._pending_model_url:
+    def _send_model_when_ready(self) -> None:
+        if not self._page_ready or not self._model_url:
             return
         self._ready_probe_count += 1
         self.web_view.page().runJavaScript(
@@ -188,8 +255,8 @@ class VRMViewerWidget(QWidget):
         )
 
     def _on_viewer_api_probe(self, ready) -> None:
-        if ready and self._pending_model_url:
-            url = json.dumps(self._pending_model_url)
+        if ready and self._model_url:
+            url = json.dumps(self._model_url)
             self.web_view.page().runJavaScript(
                 "window.axralVrmViewer.loadModel(" + url + ");"
             )
@@ -197,7 +264,7 @@ class VRMViewerWidget(QWidget):
             self.status_label.setText("VRMを読み込んでいます...")
             return
         if self._ready_probe_count < 30:
-            QTimer.singleShot(100, self._send_pending_model_when_ready)
+            QTimer.singleShot(100, self._send_model_when_ready)
         else:
             self.status_label.setText("VRMビューアの初期化に失敗しました")
 
@@ -212,3 +279,22 @@ class VRMViewerWidget(QWidget):
         self.web_view.page().runJavaScript(
             "window.axralVrmViewer?.setMocapState(" + payload + ");"
         )
+
+    def _stop_server(self) -> None:
+        server = self._server
+        self._server = None
+        if server is not None:
+            try:
+                server.shutdown()
+            except (OSError, RuntimeError):
+                pass
+            server.server_close()
+        thread = self._server_thread
+        self._server_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+    def closeEvent(self, event) -> None:
+        self._state_timer.stop()
+        self._stop_server()
+        super().closeEvent(event)

@@ -142,7 +142,6 @@ if QDialog is not None:
                 *CORE_EXPRESSIONS,
                 "Blink_L",
                 "Blink_R",
-                "Surprised",
             )
 
             root = QVBoxLayout(self)

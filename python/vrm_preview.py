@@ -88,10 +88,13 @@ class VRMViewerWidget(QWidget):
         self._expressions: dict[str, float] = {}
         self._server: _ViewerHttpServer | None = None
         self._server_thread: threading.Thread | None = None
-        self._model_route = "/__axral_model__/" + secrets.token_urlsafe(24) + ".vrm"
+        self._viewer_origin: str | None = None
+        self._web_view: QWebEngineView | None = None
+        self._pending_model_path: Path | None = None
         self._model_url: str | None = None
+        self._model_route = self._new_model_route()
 
-        self.status_label = QLabel("VRMモデルを読み込んでください")
+        self.status_label = QLabel("3Dビューアは必要になったときに起動します")
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.open_button = QPushButton("VRMを開く...")
         self.close_button = QPushButton("モデルを閉じる")
@@ -104,52 +107,81 @@ class VRMViewerWidget(QWidget):
         toolbar.addWidget(self.close_button)
         toolbar.addStretch(1)
 
-        self.web_view = QWebEngineView(self)
-        settings = self.web_view.settings()
-        settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, False
-        )
-        settings.setAttribute(
-            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False
-        )
-        settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
-        self.web_view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
-        self.web_view.setStyleSheet("background: #17191f;")
-        self.web_view.titleChanged.connect(self._on_page_title_changed)
-        self.web_view.loadFinished.connect(self._on_page_loaded)
+        self._placeholder = QLabel("VRMモデルを読み込むと、ここに3Dキャラクターを表示します")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet("color: #9da7b7; background: #17191f;")
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(4, 4, 4, 4)
+        self._layout.addLayout(toolbar)
+        self._layout.addWidget(self._placeholder, stretch=1)
+        self._layout.addWidget(self.status_label)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.addLayout(toolbar)
-        layout.addWidget(self.web_view, stretch=1)
-        layout.addWidget(self.status_label)
+        self._state_timer = QTimer(self)
+        self._state_timer.setInterval(33)
+        self._state_timer.timeout.connect(self._flush_mocap_state)
+
+    @staticmethod
+    def _new_model_route() -> str:
+        return "/__axral_model__/" + secrets.token_urlsafe(24) + ".vrm"
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._ensure_viewer()
+
+    def _ensure_viewer(self) -> bool:
+        # The hidden 3D dock is cheap: create Chromium and the loopback server
+        # only when the user actually opens the 3D preview.
+        if self._web_view is not None:
+            return self._server is not None
 
         index = _viewer_index_path()
         if index is None:
             self.status_label.setText(
                 "VRMビューア素材がありません。web/vrm_viewer で npm install と npm run build を実行してください。"
             )
-            self.web_view.hide()
-        else:
-            try:
-                self._server = _ViewerHttpServer(index.parent, self._model_route)
-                self._server_thread = threading.Thread(
-                    target=self._server.serve_forever,
-                    name="AxralVrmViewerHttp",
-                    daemon=True,
-                )
-                self._server_thread.start()
-                address, port = self._server.server_address
-                self._viewer_origin = f"http://{address}:{port}"
-                self.web_view.load(QUrl(self._viewer_origin + "/index.html"))
-            except OSError as exc:
-                self.status_label.setText(f"VRMビューアを起動できません: {exc}")
-                self.web_view.hide()
-                self._stop_server()
+            return False
 
-        self._state_timer = QTimer(self)
-        self._state_timer.setInterval(33)
-        self._state_timer.timeout.connect(self._flush_mocap_state)
+        try:
+            server = _ViewerHttpServer(index.parent, self._model_route)
+            thread = threading.Thread(
+                target=server.serve_forever,
+                name="AxralVrmViewerHttp",
+                daemon=True,
+            )
+            thread.start()
+            address, port = server.server_address
+
+            web_view = QWebEngineView(self)
+            settings = web_view.settings()
+            settings.setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, False
+            )
+            settings.setAttribute(
+                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False
+            )
+            settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+            web_view.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+            web_view.setStyleSheet("background: #17191f;")
+            web_view.titleChanged.connect(self._on_page_title_changed)
+            web_view.loadFinished.connect(self._on_page_loaded)
+
+            self._server = server
+            self._server_thread = thread
+            self._viewer_origin = f"http://{address}:{port}"
+            self._web_view = web_view
+            self._layout.insertWidget(1, web_view, stretch=1)
+            self._placeholder.hide()
+
+            if self._pending_model_path is not None:
+                server.model_path = self._pending_model_path
+                self._model_url = self._viewer_origin + self._model_route
+            web_view.load(QUrl(self._viewer_origin + "/index.html"))
+            self.status_label.setText("VRMビューアを起動しています...")
+            return True
+        except (OSError, RuntimeError) as exc:
+            self.status_label.setText(f"VRMビューアを起動できません: {exc}")
+            self._stop_server()
+            return False
 
     def open_model_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -159,9 +191,6 @@ class VRMViewerWidget(QWidget):
             self.load_model(path)
 
     def load_model(self, path: str | Path) -> None:
-        if self._server is None:
-            self.status_label.setText("VRMビューアHTTPサーバーが利用できません")
-            return
         source = Path(path).expanduser()
         if source.suffix.lower() != ".vrm":
             self.status_label.setText("VRM 0.x / 1.0 の .vrm ファイルを選択してください")
@@ -177,19 +206,27 @@ class VRMViewerWidget(QWidget):
             self.status_label.setText(f"VRMを開けません: {exc}")
             return
 
+        self._pending_model_path = resolved
+        self._ready_probe_count = 0
+        if not self._ensure_viewer():
+            return
+        assert self._server is not None and self._viewer_origin is not None
+        # A fresh route prevents a previous in-flight load from observing a
+        # newly selected file when the user switches models quickly.
+        self._model_route = self._new_model_route()
+        self._server.model_route = self._model_route
         self._server.model_path = resolved
         self._model_url = self._viewer_origin + self._model_route
-        self._ready_probe_count = 0
         self._send_model_when_ready()
 
     def close_model(self) -> None:
+        self._pending_model_path = None
         self._model_url = None
         if self._server is not None:
             self._server.model_path = None
-        self._bones.clear()
-        self._expressions.clear()
-        if self._page_ready:
-            self.web_view.page().runJavaScript("window.axralVrmViewer?.closeModel();")
+            self._server.model_route = self._new_model_route()
+        if self._page_ready and self._web_view is not None:
+            self._web_view.page().runJavaScript("window.axralVrmViewer?.closeModel();")
         self.close_button.setEnabled(False)
         self.status_label.setText("VRMモデルを閉じました")
 
@@ -249,15 +286,17 @@ class VRMViewerWidget(QWidget):
         if not self._page_ready or not self._model_url:
             return
         self._ready_probe_count += 1
-        self.web_view.page().runJavaScript(
+        if self._web_view is None:
+            return
+        self._web_view.page().runJavaScript(
             "typeof window.axralVrmViewer?.loadModel === 'function'",
             self._on_viewer_api_probe,
         )
 
     def _on_viewer_api_probe(self, ready) -> None:
-        if ready and self._model_url:
+        if ready and self._model_url and self._web_view is not None:
             url = json.dumps(self._model_url)
-            self.web_view.page().runJavaScript(
+            self._web_view.page().runJavaScript(
                 "window.axralVrmViewer.loadModel(" + url + ");"
             )
             self.close_button.setEnabled(True)
@@ -269,20 +308,21 @@ class VRMViewerWidget(QWidget):
             self.status_label.setText("VRMビューアの初期化に失敗しました")
 
     def _flush_mocap_state(self) -> None:
-        if not self._page_ready:
+        if not self._page_ready or self._web_view is None:
             return
         state = {"bones": self._bones, "expressions": self._expressions}
         try:
             payload = json.dumps(state, allow_nan=False, separators=(",", ":"))
         except (TypeError, ValueError):
             return
-        self.web_view.page().runJavaScript(
+        self._web_view.page().runJavaScript(
             "window.axralVrmViewer?.setMocapState(" + payload + ");"
         )
 
     def _stop_server(self) -> None:
         server = self._server
         self._server = None
+        self._viewer_origin = None
         if server is not None:
             try:
                 server.shutdown()
@@ -297,7 +337,8 @@ class VRMViewerWidget(QWidget):
     def shutdown(self) -> None:
         """Stop WebEngine activity and release the loopback-only HTTP server."""
         self._state_timer.stop()
-        self.web_view.stop()
+        if self._web_view is not None:
+            self._web_view.stop()
         self._stop_server()
 
     def closeEvent(self, event) -> None:

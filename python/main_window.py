@@ -78,10 +78,18 @@ except ImportError:
     _WEBSOCKET_AVAILABLE = False
 
 try:
-    from preview_3d import Head3DPreviewWidget
-    _PREVIEW_3D_AVAILABLE = True
+    from vrm_preview import VRMViewerWidget
+    _VRM_VIEWER_AVAILABLE = True
 except ImportError:
-    _PREVIEW_3D_AVAILABLE = False
+    _VRM_VIEWER_AVAILABLE = False
+
+try:
+    from preview_3d import Head3DPreviewWidget
+    _HEAD3D_PREVIEW_AVAILABLE = True
+except ImportError:
+    _HEAD3D_PREVIEW_AVAILABLE = False
+
+_PREVIEW_3D_AVAILABLE = _VRM_VIEWER_AVAILABLE or _HEAD3D_PREVIEW_AVAILABLE
 
 _MOCAP_AVAILABLE = _OSC_AVAILABLE or _WEBSOCKET_AVAILABLE
 
@@ -448,24 +456,29 @@ class MainWindow(QMainWindow):
             self.mocap_bridge.bone_transform_received.connect(self._record_motion_bone)
             self.mocap_bridge.start()
 
-        # 3Dプレビュー(モード切り替え): 2Dキャラクター(上記)と全く同じ
-        # モーションキャプチャデータで、簡易3Dヘッドプロキシを駆動する。
-        # 「共通モーションキャプチャエンジンを2D/3D両方に流し込める」ことの
-        # 実証用ドック。デフォルトでは非表示(2Dモード相当)。
+        # VRM 3Dプレビュー。WebEngineが利用できる配布環境では実際のVRM
+        # モデルを表示し、同じVMC受信経路からHumanoidボーンと表情を駆動する。
+        # WebEngineがない開発環境では従来のヘッドプロキシをフォールバック表示する。
         self.preview_3d_dock: QDockWidget | None = None
         if _PREVIEW_3D_AVAILABLE:
-            self.preview_3d_widget = Head3DPreviewWidget()
-            self.preview_3d_dock = QDockWidget("3Dプレビュー(モーションキャプチャ)", self)
+            if _VRM_VIEWER_AVAILABLE:
+                self.preview_3d_widget = VRMViewerWidget()
+            else:
+                self.preview_3d_widget = Head3DPreviewWidget()
+            self.preview_3d_dock = QDockWidget("3Dキャラクター / VRMプレビュー", self)
             self.preview_3d_dock.setWidget(self.preview_3d_widget)
             self.preview_3d_dock.setFeatures(
                 QDockWidget.DockWidgetFeature.DockWidgetMovable
                 | QDockWidget.DockWidgetFeature.DockWidgetFloatable
             )
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.preview_3d_dock)
-            self.preview_3d_dock.hide()  # デフォルトは2Dモード相当(3Dは非表示)
+            self.preview_3d_dock.hide()
 
             if self.mocap_bridge is not None:
                 self.mocap_bridge.head_quaternion_received.connect(self.preview_3d_widget.set_head_quaternion)
+                if _VRM_VIEWER_AVAILABLE:
+                    self.mocap_bridge.blend_shapes_received.connect(self.preview_3d_widget.set_blend_shapes)
+                    self.mocap_bridge.bone_transform_received.connect(self.preview_3d_widget.set_bone_transform)
 
         self._build_menu()
         self._refresh_window_title()

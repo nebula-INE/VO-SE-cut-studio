@@ -19,6 +19,7 @@ def _timeline_with_motion(*, character_visible=True, motion_visible=True):
         "2D Character",
         4.0,
         start=1.0,
+        script_line_id="test-character",
     )
     motion_clip = model.add_clip(
         motion_track.id,

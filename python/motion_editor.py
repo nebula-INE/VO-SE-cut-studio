@@ -151,8 +151,11 @@ if QDialog is not None:
             self.frame_selector = QComboBox()
             self.frame_selector.currentIndexChanged.connect(self._on_frame_changed)
             selector_row.addWidget(self.frame_selector, 1)
+            self._insert_time = _finite_time(insert_time)
             self.add_button = QPushButton("再生ヘッド位置に追加")
-            self.add_button.clicked.connect(lambda: self._add_keyframe(insert_time))
+            self.add_button.clicked.connect(
+                lambda: self._add_keyframe(self._insert_time)
+            )
             selector_row.addWidget(self.add_button)
             self.delete_button = QPushButton("削除")
             self.delete_button.clicked.connect(self._delete_current_keyframe)
@@ -220,9 +223,10 @@ if QDialog is not None:
             buttons.rejected.connect(self.reject)
             root.addWidget(buttons)
 
-            self._rebuild_selector(0)
-            frames, selected = insert_motion_keyframe(self.keyframes, insert_time)
-            self.keyframes = frames
+            selected = min(
+                range(len(self.keyframes)),
+                key=lambda index: abs(self.keyframes[index]["time"] - self._insert_time),
+            )
             self._rebuild_selector(selected)
 
         @staticmethod

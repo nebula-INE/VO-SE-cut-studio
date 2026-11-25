@@ -2374,6 +2374,8 @@ class MainWindow(QMainWindow):
         self.script_panel.cleanup()
         if self.mocap_bridge is not None:
             self.mocap_bridge.stop()
+        if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None:
+            self.preview_3d_widget.shutdown()
         super().closeEvent(event)
 
 

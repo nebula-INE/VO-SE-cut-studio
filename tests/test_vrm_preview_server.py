@@ -4,12 +4,13 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("PySide6.QtWebEngineCore")
 
-from vrm_preview import _ViewerHttpServer
+from vrm_preview import _ViewerHttpServer, VRMViewerWidget
 
 
 def test_viewer_http_server_binds_loopback_and_serves_selected_vrm_only(
@@ -47,3 +48,28 @@ def test_viewer_http_server_binds_loopback_and_serves_selected_vrm_only(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+
+def test_vrm_root_bone_keeps_position_and_normalizes_rotation() -> None:
+    target = SimpleNamespace(_bones={})
+
+    VRMViewerWidget.set_bone_transform_3d(
+        target, "Hips", 0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 2.0
+    )
+
+    assert target._bones["hips"] == {
+        "rotation": (0.0, 0.0, 0.0, 1.0),
+        "position": (0.1, 0.2, 0.3),
+    }
+
+
+def test_vrm_child_bone_keeps_model_rest_position() -> None:
+    target = SimpleNamespace(_bones={})
+
+    VRMViewerWidget.set_bone_transform_3d(
+        target, "LeftUpperArm", 5.0, 6.0, 7.0, 0.0, 0.0, 0.0, 1.0
+    )
+
+    assert target._bones["leftUpperArm"] == {"rotation": (0.0, 0.0, 0.0, 1.0)}
+    assert "position" not in target._bones["leftUpperArm"]

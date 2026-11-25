@@ -6,6 +6,9 @@ import sys
 from pathlib import Path
 
 
+_DLL_DIRECTORY_HANDLES: list[object] = []
+
+
 def configure_runtime_search_paths() -> None:
     """Expose bundled native libraries and command-line tools to the OS loader."""
     roots: list[Path] = []
@@ -23,7 +26,8 @@ def configure_runtime_search_paths() -> None:
                 if value not in search_paths:
                     search_paths.append(value)
                 if os.name == "nt" and hasattr(os, "add_dll_directory"):
-                    os.add_dll_directory(value)
+                    # Keep the handle alive; closing it removes the DLL search path.
+                    _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(value))
 
     if search_paths:
         existing = os.environ.get("PATH", "")

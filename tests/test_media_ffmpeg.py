@@ -25,7 +25,12 @@ def test_find_ffmpeg_executable_accepts_explicit_file(tmp_path, monkeypatch):
 
 
 def test_find_ffmpeg_executable_reports_missing_runtime(monkeypatch):
+    monkeypatch.delenv("FFMPEG_BINARY", raising=False)
     monkeypatch.setattr(media_ffmpeg.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(media_ffmpeg, "find_runtime_file", lambda *args, **kwargs: None)
+    # The application also checks bundled and well-known Homebrew locations.
+    # Mask all filesystem hits so this test stays independent of the CI host.
+    monkeypatch.setattr(media_ffmpeg.Path, "is_file", lambda _path: False)
 
     with pytest.raises(MediaToolError, match="FFMPEG_BINARY"):
         find_ffmpeg_executable()

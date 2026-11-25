@@ -254,7 +254,7 @@ def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
         "keyframes": normalized,
     }
     encoded = (
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\\n"
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     ).encode("utf-8")
     if len(encoded) > MAX_MOTION_FILE_BYTES:
         raise CharacterMotionError(

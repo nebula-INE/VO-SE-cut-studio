@@ -86,8 +86,11 @@ def build_application() -> Path:
         "--collect-all", "OpenGL",
     ]
     add_binary(arguments, native_library, "native")
-    add_binary(arguments, ffmpeg, "bin")
-    add_binary(arguments, ffprobe, "bin")
+    # Homebrew FFmpeg uses dylib basenames that can collide with Qt's private
+    # FFmpeg build inside PySide6. On macOS use the user's Homebrew installation.
+    if sys.platform != "darwin":
+        add_binary(arguments, ffmpeg, "bin")
+        add_binary(arguments, ffprobe, "bin")
 
     if os.name == "nt":
         dll_dir = ROOT / "vcpkg/installed/x64-windows/bin"

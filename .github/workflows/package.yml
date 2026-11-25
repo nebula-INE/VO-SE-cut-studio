@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  AXRAL_PACKAGE_VERSION: 0.1.\${{ github.run_number }}
+  AXRAL_PACKAGE_VERSION: 0.1.${{ github.run_number }}
 
 jobs:
   package:

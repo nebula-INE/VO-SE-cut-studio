@@ -11,5 +11,7 @@ pyopenjtalk>=0.4.1
 Pillow>=10.0
 # モーションキャプチャ受信(osc_receiver.py / VMCプロトコル)
 python-osc>=1.8
+# JSON/WebSocketモーションキャプチャ受信(websocket_receiver.py)
+websockets>=12.0
 # 3Dプレビュー(preview_3d.py)
 PyOpenGL>=3.1

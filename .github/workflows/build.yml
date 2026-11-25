@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python dependencies
-        run: pip install pybind11 PySide6 numpy
+        run: pip install pybind11 PySide6 numpy pytest Pillow python-osc websockets
 
       - name: Setup vcpkg
         run: |
@@ -32,6 +32,21 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Stage FFmpeg runtime DLLs
+        shell: pwsh
+        run: |
+          $runtimeDir = "vcpkg/installed/x64-windows/bin"
+          if (Test-Path $runtimeDir) {
+            Get-ChildItem -Path $runtimeDir -Filter "*.dll" -File |
+              Copy-Item -Destination "build/Release" -Force
+          }
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Verify native release runtime
+        run: python scripts/smoke_release_artifacts.py
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -39,6 +54,7 @@ jobs:
           path: |
             build/Release/*.exe
             build/Release/*.pyd
+            build/Release/*.dll
             python/
 
   build-macos:
@@ -52,7 +68,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python dependencies
-        run: pip install pybind11 PySide6 numpy
+        run: pip install pybind11 PySide6 numpy pytest Pillow python-osc websockets
 
       - name: Install dependencies
         run: brew install ffmpeg
@@ -63,6 +79,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Verify native release runtime
+        run: python scripts/smoke_release_artifacts.py
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -71,6 +93,7 @@ jobs:
             build/aural-engine
             build/aural-compose
             build/aural_engine*.so
+            build/libvose_core.dylib
             python/
 
   build-linux:
@@ -84,7 +107,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python dependencies
-        run: pip install pybind11 PySide6 numpy
+        run: pip install pybind11 PySide6 numpy pytest Pillow python-osc websockets
 
       - name: Install dependencies
         run: |
@@ -106,6 +129,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Verify native release runtime
+        run: python scripts/smoke_release_artifacts.py
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -114,4 +143,5 @@ jobs:
             build/aural-engine
             build/aural-compose
             build/aural_engine*.so
+            build/libvose_core.so
             python/

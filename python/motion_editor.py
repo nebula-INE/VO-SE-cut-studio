@@ -97,15 +97,15 @@ def retime_motion_keyframes(
     """Move and scale all keyframe times while preserving every pose value."""
     normalized = normalize_motion_keyframes(keyframes)
     if isinstance(duration_scale, bool):
-        raise CharacterMotionError("Motion speed scale must be a finite positive number")
+        raise CharacterMotionError("Motion duration scale must be a finite positive number")
     try:
         scale = float(duration_scale)
     except (TypeError, ValueError) as exc:
         raise CharacterMotionError(
-            "Motion speed scale must be a finite positive number"
+            "Motion duration scale must be a finite positive number"
         ) from exc
     if not math.isfinite(scale) or scale <= 0.0:
-        raise CharacterMotionError("Motion speed scale must be a finite positive number")
+        raise CharacterMotionError("Motion duration scale must be a finite positive number")
 
     target_start = _finite_time(start_time)
     original_start = normalized[0]["time"]
@@ -252,7 +252,7 @@ if QDialog is not None:
             self.retime_button.clicked.connect(self._retime_all_keyframes)
             retime_form.addRow(self.retime_button)
             self.retime_status = QLabel(
-                "開始時間と速度倍率を指定すると、ポーズを変えずに全キーの時間だけ調整します。"
+                "開始時間と動作時間倍率を指定すると、ポーズを変えずに全キーの時間だけ調整します。"
             )
             self.retime_status.setWordWrap(True)
             retime_form.addRow(self.retime_status)

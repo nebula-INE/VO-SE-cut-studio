@@ -10,6 +10,7 @@ from timeline_model import TimelineModel
 from timeline_video_render import (
     VideoRenderError,
     render_timeline_video,
+    timeline_motion_clips,
     timeline_video_clips,
 )
 
@@ -213,15 +214,15 @@ def test_render_timeline_video_rejects_duration_shorter_than_clip(tmp_path):
 
 
 
-def test_timeline_video_clips_reject_motion_track_payloads():
+def test_timeline_motion_clips_require_a_matching_character():
     model = TimelineModel.create_default()
     motion_track = next(track for track in model.tracks if track.kind == "motion")
     model.add_clip(
-        motion_track.id, "motion", "body motion", 1.0, script_line_id="motion-1"
+        motion_track.id, "motion", "body motion", 1.0, asset_id="motion-asset"
     )
 
-    with pytest.raises(VideoRenderError, match="モーションクリップ"):
-        timeline_video_clips(model)
+    with pytest.raises(VideoRenderError, match="キャラクタークリップ"):
+        timeline_motion_clips(model)
 
 
 
@@ -289,12 +290,82 @@ def test_render_timeline_video_adds_subtitle_as_timed_overlay(tmp_path, monkeypa
     assert result.subtitle_clip_count == 1
 
 
-def test_timeline_video_clips_still_reject_motion_tracks():
+
+
+
+
+def test_timeline_motion_clip_drives_builtin_character_mp4_frames(
+    tmp_path, monkeypatch
+):
+    import json
+    from PIL import Image
+
     model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
     motion_track = next(track for track in model.tracks if track.kind == "motion")
     model.add_clip(
-        motion_track.id, "motion", "body motion", 1.0, script_line_id="motion-1"
+        overlay.id, "character", "2D Character", 1.0,
+        script_line_id="__aural_builtin_2d_character__",
+    )
+    motion = model.add_clip(
+        motion_track.id, "motion", "head motion", 1.0, asset_id="motion-asset"
+    )
+    motion_path = tmp_path / "actor.motion.json"
+    motion_path.write_text(
+        json.dumps({
+            "format": "aural-motion",
+            "version": 1,
+            "keyframes": [
+                {"time": 0.0, "head": {"tilt_deg": 0.0}},
+                {"time": 1.0, "head": {"tilt_deg": 20.0}},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    output = tmp_path / "character.mp4"
+    executable = tmp_path / "ffmpeg"
+    executable.write_bytes(b"fake ffmpeg")
+    captured = {"states": []}
+
+    def fake_character(**kwargs):
+        captured["states"].append(kwargs)
+        return Image.new("RGBA", (40, 60), (255, 0, 0, 128))
+
+    monkeypatch.setattr(
+        timeline_video_render, "render_character_frame", fake_character
     )
 
-    with pytest.raises(VideoRenderError, match="モーションクリップ"):
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(timeline_video_render.subprocess, "run", fake_run)
+    result = render_timeline_video(
+        model,
+        lambda clip: motion_path if clip.id == motion.id else tmp_path / "unused",
+        output,
+        ffmpeg_path=executable,
+        still_image_canvas=(1280, 720),
+    )
+
+    graph = captured["command"][captured["command"].index("-filter_complex") + 1]
+    assert len(captured["states"]) == 30
+    assert captured["states"][0]["head_tilt_deg"] == pytest.approx(0.0)
+    assert captured["states"][-1]["head_tilt_deg"] > 19.0
+    assert "-framerate" in captured["command"]
+    assert "overlay=x=21:y=H-h-21" in graph
+    assert result.character_clip_count == 1
+    assert result.motion_clip_count == 1
+    assert result.output_path == output.resolve()
+
+
+def test_timeline_video_clips_reject_external_3d_character_assets():
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    model.add_clip(
+        overlay.id, "character", "avatar.vrm", 1.0, asset_id="vrm-asset"
+    )
+
+    with pytest.raises(VideoRenderError, match="3D character asset"):
         timeline_video_clips(model)

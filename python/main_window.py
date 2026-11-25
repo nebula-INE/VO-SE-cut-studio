@@ -17,6 +17,7 @@ import inspect
 import platform
 import sys
 import tempfile
+import time
 import wave
 from pathlib import Path
 
@@ -47,9 +48,18 @@ from media_ffmpeg import (
     mux_audio_into_video,
 )
 from timeline_video_render import (
+    BUILTIN_2D_CHARACTER_ID,
     VideoRenderError,
     render_timeline_video,
+    timeline_motion_clips,
     timeline_video_clips,
+)
+from character_motion import save_motion_file
+from motion_capture_recorder import (
+    FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
+    MAX_RECORDING_SECONDS,
+    MotionCaptureRecorder,
+    MotionCaptureRecordingError,
 )
 
 try:
@@ -270,6 +280,7 @@ class _TimelineFullVideoExportTask(QRunnable):
         try:
             model = TimelineModel.from_dict(self.timeline_payload)
             visual_clips = timeline_video_clips(model, self.subtitle_texts)
+            motion_clips = timeline_motion_clips(model)
             audio_clips = timeline_audio_clips(model)
             duration = max(
                 [clip.end for clip in visual_clips]
@@ -287,6 +298,8 @@ class _TimelineFullVideoExportTask(QRunnable):
                     duration_seconds=duration,
                     ffmpeg_path=self.ffmpeg_path,
                     subtitle_texts=self.subtitle_texts,
+                    motion_clips=motion_clips,
+                    voice_clips=audio_clips,
                 )
                 clipped_sample_count = 0
                 peak_level = 0.0
@@ -311,6 +324,8 @@ class _TimelineFullVideoExportTask(QRunnable):
                 "output_path": str(Path(self.output_path).expanduser().resolve()),
                 "video_clip_count": video_result.video_clip_count,
                 "subtitle_clip_count": video_result.subtitle_clip_count,
+                "character_clip_count": video_result.character_clip_count,
+                "motion_clip_count": video_result.motion_clip_count,
                 "audio_clip_count": len(audio_clips),
                 "duration_seconds": video_result.duration_seconds,
                 "width": video_result.width,
@@ -337,6 +352,12 @@ class MainWindow(QMainWindow):
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
         self._pending_generated_audio: dict[str, tuple[str, str]] = {}
+        self._motion_capture_recorder = MotionCaptureRecorder()
+        self._motion_capture_timer = QTimer(self)
+        self._motion_capture_timer.setInterval(round(1000 / MOTION_CAPTURE_FRAME_RATE))
+        self._motion_capture_timer.timeout.connect(self._capture_motion_frame)
+        self._motion_capture_start_action = None
+        self._motion_capture_stop_action = None
         self._project_dirty = False
         self._discard_pending = False
         self.script_panel.content_changed.connect(self._mark_project_dirty)
@@ -415,6 +436,9 @@ class MainWindow(QMainWindow):
             self.mocap_bridge.head_transform_received.connect(self.preview_panel.set_head_transform)
             self.mocap_bridge.blend_shapes_received.connect(self.preview_panel.set_blend_shapes)
             self.mocap_bridge.bone_transform_received.connect(self.preview_panel.set_bone_transform)
+            self.mocap_bridge.head_transform_received.connect(self._record_motion_head)
+            self.mocap_bridge.blend_shapes_received.connect(self._record_motion_blend_shapes)
+            self.mocap_bridge.bone_transform_received.connect(self._record_motion_bone)
             self.mocap_bridge.start()
 
         # 3Dプレビュー(モード切り替え): 2Dキャラクター(上記)と全く同じ
@@ -483,6 +507,8 @@ class MainWindow(QMainWindow):
         timeline_menu.addSeparator()
         caption_action = timeline_menu.addAction("台本字幕をタイムラインに配置")
         caption_action.triggered.connect(self.add_script_lines_to_timeline)
+        character_action = timeline_menu.addAction("2Dキャラクタークリップを追加...")
+        character_action.triggered.connect(self.add_2d_character_clip)
         timeline_menu.addSeparator()
         self._export_audio_mix_action = timeline_menu.addAction("音声ミックスをWAVに書き出す...")
         self._export_audio_mix_action.triggered.connect(self.export_timeline_audio_mix)
@@ -495,6 +521,14 @@ class MainWindow(QMainWindow):
             "タイムライン全体をMP4に書き出す..."
         )
         self._export_timeline_video_action.triggered.connect(self.export_timeline_full_video)
+
+        motion_menu = menu_bar.addMenu("モーションキャプチャ")
+        self._motion_capture_start_action = motion_menu.addAction("録画開始")
+        self._motion_capture_start_action.triggered.connect(self.start_motion_capture_recording)
+        self._motion_capture_stop_action = motion_menu.addAction("録画停止・タイムラインに保存")
+        self._motion_capture_stop_action.triggered.connect(self.stop_motion_capture_recording)
+        self._motion_capture_stop_action.setEnabled(False)
+        self._motion_capture_start_action.setEnabled(self.mocap_bridge is not None)
 
         view_menu = menu_bar.addMenu("表示")
         toggle_script_action = self.script_dock.toggleViewAction()
@@ -783,6 +817,13 @@ class MainWindow(QMainWindow):
 
     def _confirm_discard_changes(self) -> bool:
         self._discard_pending = False
+        if self._motion_capture_recorder.is_recording:
+            QMessageBox.information(
+                self,
+                "モーション録画中",
+                "プロジェクトを切り替える前に、モーション録画を停止してください。",
+            )
+            return False
         if not self._project_dirty:
             return True
         choice = QMessageBox.question(
@@ -1549,16 +1590,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "タイムラインMP4書き出し",
-                "表示中で有効な動画・静止画クリップがありません。",
+                "表示中で有効な動画・静止画・字幕・キャラクタークリップがありません。",
             )
             return
 
+        motion_clips = timeline_motion_clips(snapshot)
         audio_clips = timeline_audio_clips(snapshot)
-        all_clips = visual_clips + audio_clips
+        all_clips = visual_clips + audio_clips + motion_clips
         try:
             asset_paths: dict[str, str] = {}
             for clip in all_clips:
-                if clip.kind == "text":
+                if clip.kind in {"text", "character"}:
                     continue
                 asset = self._project.get_asset(clip.asset_id or "")
                 if asset is None:
@@ -1634,6 +1676,8 @@ class MainWindow(QMainWindow):
             f"保存先: {result['output_path']}\\n"
             f"映像・静止画: {result['video_clip_count']} クリップ / "
             f"字幕: {result['subtitle_clip_count']} クリップ / "
+            f"2Dキャラクター: {result['character_clip_count']} クリップ / "
+            f"モーション: {result['motion_clip_count']} クリップ / "
             f"音声: {result['audio_clip_count']} クリップ\\n"
             f"解像度: {result['width']}×{result['height']} / "
             f"{result['frame_rate']:g} fps / {result['duration_seconds']:.2f} 秒"
@@ -1654,6 +1698,246 @@ class MainWindow(QMainWindow):
         self._finish_timeline_full_video_export()
         QMessageBox.critical(self, "タイムラインMP4書き出しに失敗しました", message)
         self.statusBar().showMessage("タイムラインMP4書き出しに失敗しました", 8000)
+
+    def _record_motion_head(self, x: float, y: float, tilt_deg: float) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_head(x, y, tilt_deg)
+            except MotionCaptureRecordingError as exc:
+                self.statusBar().showMessage(f"モーション値を無視しました: {exc}", 5000)
+
+    def _record_motion_blend_shapes(self, values: dict) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_blend_shapes(values)
+            except (MotionCaptureRecordingError, TypeError, ValueError) as exc:
+                self.statusBar().showMessage(f"表情データを無視しました: {exc}", 5000)
+
+    def _record_motion_bone(
+        self, name: str, qx: float, qy: float, qz: float, qw: float
+    ) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_bone(name, qx, qy, qz, qw)
+            except MotionCaptureRecordingError as exc:
+                self.statusBar().showMessage(f"ボーンデータを無視しました: {exc}", 5000)
+
+    def start_motion_capture_recording(self) -> None:
+        """Start recording live OSC/VMC or WebSocket state into motion keyframes."""
+        if self.mocap_bridge is None:
+            QMessageBox.information(
+                self,
+                "モーションキャプチャ録画",
+                "OSC/WebSocketのモーションキャプチャ受信が利用できません。",
+            )
+            return
+        if self._motion_capture_recorder.is_recording:
+            return
+        if self._project.file_path is None and not self.save_project_as():
+            return
+        try:
+            self._motion_capture_recorder.start()
+        except MotionCaptureRecordingError as exc:
+            QMessageBox.warning(self, "録画を開始できません", str(exc))
+            return
+        self._motion_capture_timer.start()
+        if self._motion_capture_start_action is not None:
+            self._motion_capture_start_action.setEnabled(False)
+        if self._motion_capture_stop_action is not None:
+            self._motion_capture_stop_action.setEnabled(True)
+        self.statusBar().showMessage(
+            f"モーション録画中 ({MOTION_CAPTURE_FRAME_RATE:g} fps)。"
+            "「モーションキャプチャ → 録画停止・タイムラインに保存」で終了します。",
+            0,
+        )
+
+    def _capture_motion_frame(self) -> None:
+        if not self._motion_capture_recorder.is_recording:
+            self._motion_capture_timer.stop()
+            return
+        try:
+            self._motion_capture_recorder.capture()
+            self.statusBar().showMessage(
+                f"モーション録画中 · {self._motion_capture_recorder.keyframe_count} "
+                f"キーフレーム · 上限 {MAX_RECORDING_SECONDS:g} 秒",
+                0,
+            )
+        except MotionCaptureRecordingError as exc:
+            self.stop_motion_capture_recording()
+            QMessageBox.warning(
+                self,
+                "録画上限に達しました",
+                f"{exc}。取得済みのモーションをタイムラインへ保存しました。",
+            )
+
+    def stop_motion_capture_recording(self) -> bool:
+        """Stop capture, save a managed motion asset, and place it on the timeline."""
+        if not self._motion_capture_recorder.is_recording:
+            return True
+        self._motion_capture_timer.stop()
+        if self._motion_capture_start_action is not None:
+            self._motion_capture_start_action.setEnabled(self.mocap_bridge is not None)
+        if self._motion_capture_stop_action is not None:
+            self._motion_capture_stop_action.setEnabled(False)
+
+        try:
+            keyframes = self._motion_capture_recorder.stop()
+        except MotionCaptureRecordingError as exc:
+            QMessageBox.warning(self, "録画を停止できません", str(exc))
+            return False
+
+        temporary_path: Path | None = None
+        asset = None
+        motion_clip_id: str | None = None
+        character_clip_id: str | None = None
+        try:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            with tempfile.NamedTemporaryFile(
+                prefix=f"Motion_Take_{stamp}_",
+                suffix=".motion.json",
+                delete=False,
+            ) as stream:
+                temporary_path = Path(stream.name)
+            save_motion_file(temporary_path, keyframes)
+            asset = self._project.add_asset(
+                temporary_path,
+                "motion",
+                copy_into_project=True,
+            )
+
+            model = self.timeline_panel.model
+            start = self.timeline_panel.playhead_seconds
+            duration = max(0.05, float(keyframes[-1]["time"]))
+            end = start + duration
+            overlapping_characters = [
+                clip for clip in model.clips
+                if clip.kind == "character" and clip.enabled
+                and clip.start < end and clip.end > start
+                and (track := model.get_track(clip.track_id)) is not None
+                and not track.muted and track.visible
+            ]
+
+            if not overlapping_characters:
+                overlay_tracks = [
+                    track for track in model.tracks
+                    if track.kind == "overlay"
+                    and not track.locked and not track.muted and track.visible
+                ]
+                if not overlay_tracks:
+                    count = 1 + sum(
+                        1 for track in model.tracks if track.kind == "overlay"
+                    )
+                    overlay_tracks = [model.add_track(f"Overlay {count}", "overlay")]
+                character = model.add_clip(
+                    overlay_tracks[0].id,
+                    "character",
+                    "2D Character",
+                    duration,
+                    start=start,
+                    script_line_id=BUILTIN_2D_CHARACTER_ID,
+                )
+                character_clip_id = character.id
+
+            motion_tracks = [
+                track for track in model.tracks
+                if track.kind == "motion"
+                and not track.locked and not track.muted and track.visible
+            ]
+            if not motion_tracks:
+                count = 1 + sum(
+                    1 for track in model.tracks if track.kind == "motion"
+                )
+                motion_tracks = [model.add_track(f"Motion {count}", "motion")]
+            motion = model.add_clip(
+                motion_tracks[0].id,
+                "motion",
+                f"Motion Take {stamp}",
+                duration,
+                start=start,
+                asset_id=asset.id,
+            )
+            motion_clip_id = motion.id
+            self.timeline_panel.refresh()
+            self._mark_project_dirty()
+
+            if not self.save_project():
+                self.statusBar().showMessage(
+                    "モーションはプロジェクトに追加されましたが、プロジェクトファイルは未保存です。",
+                    8000,
+                )
+                return False
+            self.statusBar().showMessage(
+                f"モーションを保存してタイムラインに配置しました: {asset.name}",
+                8000,
+            )
+            return True
+        except (OSError, ProjectError, TimelineError, MotionCaptureRecordingError, ValueError) as exc:
+            if motion_clip_id is not None:
+                self.timeline_panel.model.remove_clip(motion_clip_id)
+            if character_clip_id is not None:
+                self.timeline_panel.model.remove_clip(character_clip_id)
+            if asset is not None:
+                try:
+                    self._project.remove_asset(asset.id, delete_managed_file=True)
+                except (OSError, ProjectError):
+                    pass
+            self.timeline_panel.refresh()
+            self._mark_project_dirty()
+            QMessageBox.critical(
+                self,
+                "モーション保存エラー",
+                f"録画データをプロジェクトへ保存できませんでした: {exc}",
+            )
+            return False
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def add_2d_character_clip(self) -> None:
+        """Add the built-in 2D placeholder character to the overlay track."""
+        tracks = [
+            track for track in self.timeline_panel.model.tracks
+            if track.kind == "overlay" and not track.locked
+        ]
+        if not tracks:
+            index = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == "overlay"
+            )
+            tracks = [
+                self.timeline_panel.model.add_track(f"Overlay {index}", "overlay")
+            ]
+        duration, accepted = QInputDialog.getDouble(
+            self,
+            "2Dキャラクターを追加",
+            "表示時間 (秒):",
+            5.0,
+            0.05,
+            3600.0,
+            2,
+        )
+        if not accepted:
+            return
+        try:
+            self.timeline_panel.model.add_clip(
+                tracks[0].id,
+                "character",
+                "2D Character",
+                duration,
+                start=self.timeline_panel.playhead_seconds,
+                script_line_id=BUILTIN_2D_CHARACTER_ID,
+            )
+        except TimelineError as exc:
+            QMessageBox.warning(self, "キャラクター追加エラー", str(exc))
+            return
+        self.timeline_panel.refresh()
+        self._mark_project_dirty()
+        self.statusBar().showMessage(
+            "2Dプレースホルダーキャラクターをタイムラインに追加しました",
+            5000,
+        )
 
     def add_script_lines_to_timeline(self) -> None:
         """Place script lines on an overlay track as linked text clips.
@@ -1728,6 +2012,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "トラック追加エラー", str(exc))
 
     def _asset_default_duration(self, asset) -> float:
+        if asset.kind == "motion":
+            try:
+                from character_motion import load_motion_file, motion_duration
+                duration = motion_duration(load_motion_file(self._project.resolve_asset(asset)))
+                if duration >= 0.05:
+                    return duration
+            except (OSError, ValueError, ProjectError):
+                pass
+            return 5.0
         if asset.kind == "video":
             active_id = self._project.settings.get("active_video_asset_id")
             if active_id == asset.id and self.preview_panel.decoder is not None:
@@ -1750,7 +2043,7 @@ class MainWindow(QMainWindow):
     def add_timeline_clip_from_assets(self) -> None:
         available = [
             asset for asset in self._project.assets
-            if asset.kind in {"video", "audio", "image", "character", "other"}
+            if asset.kind in {"video", "audio", "image", "character", "motion", "other"}
         ]
         if not available:
             QMessageBox.information(
@@ -1773,6 +2066,7 @@ class MainWindow(QMainWindow):
             "audio": ("audio", "audio"),
             "image": ("image", "overlay"),
             "character": ("character", "overlay"),
+            "motion": ("motion", "motion"),
             "other": ("other", "other"),
         }
         clip_kind, track_kind = mapping[asset.kind]
@@ -1870,6 +2164,8 @@ class MainWindow(QMainWindow):
             return "audio"
         if extension in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
             return "image"
+        if Path(path).name.lower().endswith(".motion.json"):
+            return "motion"
         if extension in {".vrm", ".vmd", ".fbx", ".obj", ".glb", ".gltf"}:
             return "character"
         return "other"
@@ -1890,7 +2186,7 @@ class MainWindow(QMainWindow):
             self,
             "プロジェクトに追加する素材を選択",
             "",
-            "メディア/素材 (*.mp4 *.mov *.mkv *.avi *.webm *.wav *.mp3 *.flac *.aac *.m4a *.ogg *.png *.jpg *.jpeg *.webp *.bmp *.vrm *.vmd *.fbx *.obj *.glb *.gltf);;すべてのファイル (*)",
+            "メディア/素材 (*.mp4 *.mov *.mkv *.avi *.webm *.wav *.mp3 *.flac *.aac *.m4a *.ogg *.png *.jpg *.jpeg *.webp *.bmp *.vrm *.vmd *.fbx *.obj *.glb *.gltf *.motion.json);;すべてのファイル (*)",
         )
         if not path:
             return
@@ -2021,6 +2317,10 @@ class MainWindow(QMainWindow):
             )
             event.ignore()
             return
+        if self._motion_capture_recorder.is_recording:
+            if not self.stop_motion_capture_recording():
+                event.ignore()
+                return
         if not self._confirm_discard_changes():
             event.ignore()
             return

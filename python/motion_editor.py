@@ -135,14 +135,13 @@ if QDialog is not None:
             self._displayed_bone_rolls: dict[str, float] = {}
             self._original_bones: dict[str, list[float] | tuple[float, ...]] = {}
 
-            shape_names = {
-                name
-                for frame in self.keyframes
-                for name in frame.get("blend_shapes", {})
-            }
-            canonical_names = {normalize_name(name) for name in shape_names}
-            self.expression_names = tuple(
-                sorted(set(CORE_EXPRESSIONS) | canonical_names)
+            # Keep the UI bounded even for hand-authored files with many custom
+            # blend-shape names. Unlisted/custom names remain intact in the file.
+            self.expression_names = (
+                *CORE_EXPRESSIONS,
+                "Blink_L",
+                "Blink_R",
+                "Surprised",
             )
 
             root = QVBoxLayout(self)

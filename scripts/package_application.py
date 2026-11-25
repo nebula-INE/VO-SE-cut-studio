@@ -116,6 +116,16 @@ def build_application() -> Path:
 
     if not executable.is_file():
         raise RuntimeError(f"Packaged executable was not found: {executable}")
+    if sys.platform == "darwin":
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "fix_macos_ffmpeg_rpaths.py"),
+                str(app_dir),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
     smoke = subprocess.run(
         [str(executable), "--runtime-check"],
         cwd=ROOT, env=os.environ.copy(), check=False,

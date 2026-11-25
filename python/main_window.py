@@ -1173,6 +1173,7 @@ class MainWindow(QMainWindow):
         if clip is not None and clip.kind == "video":
             timeline_seconds = clip.timeline_time_at(source_seconds)
             self.timeline_panel.set_playhead(timeline_seconds)
+            self._update_timeline_motion_preview(timeline_seconds)
             if self._timeline_playback_requested and self.preview_panel.is_playing:
                 if self.timeline_audio.is_playing:
                     self.timeline_audio.sync_to_timeline(timeline_seconds)
@@ -1186,6 +1187,7 @@ class MainWindow(QMainWindow):
                 self._advance_timeline_video_clip(clip)
         else:
             self.timeline_panel.set_playhead(source_seconds)
+            self._update_timeline_motion_preview(source_seconds)
 
     def _on_preview_playback_state_changed(self, playing: bool) -> None:
         """Track user transport changes and start/stop the timeline audio clock."""

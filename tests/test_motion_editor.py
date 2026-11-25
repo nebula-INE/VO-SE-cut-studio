@@ -142,7 +142,7 @@ def test_retime_motion_keyframes_moves_and_scales_all_times_without_changing_pos
     assert [frame["time"] for frame in original] == [0.0, 1.0]
 
 
-def test_retime_motion_keyframes_uses_first_frame_as_speed_pivot():
+def test_retime_motion_keyframes_uses_first_frame_as_duration_pivot():
     from motion_editor import retime_motion_keyframes
 
     frames = _frames()

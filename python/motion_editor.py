@@ -265,8 +265,14 @@ if QDialog is not None:
             self.mouth_spin.setValue(float(frame.get("mouth_openness", 0.0)))
 
             shapes = frame.get("blend_shapes", {})
+            canonical_shapes: dict[str, float] = {}
+            for raw_name, value in shapes.items():
+                name = normalize_name(raw_name)
+                canonical_shapes[name] = max(
+                    canonical_shapes.get(name, 0.0), float(value)
+                )
             for name, spin in self.expression_spins.items():
-                spin.setValue(float(shapes.get(name, 0.0)))
+                spin.setValue(float(canonical_shapes.get(name, 0.0)))
             vowels = frame.get("vowels", {})
             for name, spin in self.vowel_spins.items():
                 spin.setValue(float(vowels.get(name, 0.0)))
@@ -293,12 +299,16 @@ if QDialog is not None:
             frame["mouth_openness"] = float(self.mouth_spin.value())
 
             shapes = dict(frame.get("blend_shapes", {}))
+            previously_present = {
+                normalize_name(raw_name) for raw_name in shapes
+            }
+            for raw_name in list(shapes):
+                if normalize_name(raw_name) in self.expression_spins:
+                    shapes.pop(raw_name)
             for name, spin in self.expression_spins.items():
                 value = float(spin.value())
-                if value > 0.0 or name in shapes:
+                if value > 0.0 or name in previously_present:
                     shapes[name] = value
-                else:
-                    shapes.pop(name, None)
             frame["blend_shapes"] = shapes
 
             vowels = dict(frame.get("vowels", {}))

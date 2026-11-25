@@ -12,7 +12,7 @@
 
 // ディスクキャッシュの先頭に書き込むヘッダ情報
 struct VoseCacheHeader {
-    uint32_t magic;     // 'VOSE' (0x45534F56) かどうかを確認するマジックナンバー
+    uint32_t magic;     // キャッシュ形式互換性を確認するマジックナンバー (0x46534F56)
     int length;         // フレーム数
     int spec_bins;      // 周波数ビン数
 };

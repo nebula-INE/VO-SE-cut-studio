@@ -64,9 +64,10 @@ def copy_homebrew_ffmpeg_libraries(private_dir: Path, source_dir: Path) -> None:
             if not source.is_file():
                 continue
             destination = private_dir / source.name
-            if not destination.exists():
-                shutil.copy2(source.resolve(), destination)
-                print(f"[macos-native] Added Homebrew library: {destination.name}")
+            # Prefer the exact Homebrew FFmpeg binary even if PyInstaller
+            # staged a same-named Qt-private library in the top-level bundle.
+            shutil.copy2(source.resolve(), destination)
+            print(f"[macos-native] Added Homebrew library: {destination.name}")
 
 
 def move_top_level_dylibs(frameworks: Path, private_dir: Path) -> set[str]:

@@ -88,6 +88,37 @@ def insert_motion_keyframe(
     return normalized, index
 
 
+def retime_motion_keyframes(
+    keyframes: list[dict[str, Any]],
+    *,
+    start_time: float,
+    duration_scale: float = 1.0,
+) -> list[dict[str, Any]]:
+    """Move and scale all keyframe times while preserving every pose value."""
+    normalized = normalize_motion_keyframes(keyframes)
+    if isinstance(duration_scale, bool):
+        raise CharacterMotionError("Motion duration scale must be a finite positive number")
+    try:
+        scale = float(duration_scale)
+    except (TypeError, ValueError) as exc:
+        raise CharacterMotionError(
+            "Motion duration scale must be a finite positive number"
+        ) from exc
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise CharacterMotionError("Motion duration scale must be a finite positive number")
+
+    target_start = _finite_time(start_time)
+    original_start = normalized[0]["time"]
+    retimed = []
+    for frame in normalized:
+        updated = dict(frame)
+        updated["time"] = target_start + (frame["time"] - original_start) * scale
+        if not math.isfinite(updated["time"]):
+            raise CharacterMotionError("Retimed keyframe time must remain finite")
+        retimed.append(updated)
+    return normalize_motion_keyframes(retimed)
+
+
 def delete_motion_keyframe(
     keyframes: list[dict[str, Any]], index: int
 ) -> list[dict[str, Any]]:
@@ -128,7 +159,7 @@ if QDialog is not None:
         ) -> None:
             super().__init__(parent)
             self.setWindowTitle("モーションのキーフレーム編集")
-            self.resize(760, 660)
+            self.resize(760, 750)
             self.keyframes = normalize_motion_keyframes(keyframes)
             self._current_index = 0
             self._displayed_scalars: dict[str, float] = {}
@@ -206,6 +237,26 @@ if QDialog is not None:
                 arm_grid.addWidget(QLabel(name), index // 2, (index % 2) * 2)
                 arm_grid.addWidget(spin, index // 2, (index % 2) * 2 + 1)
             root.addWidget(arm_group)
+
+            retime_group = QGroupBox("全体の時間調整")
+            retime_form = QFormLayout(retime_group)
+            self.retime_start_spin = self._spin(
+                0.0, max(1_000_000.0, float(self.keyframes[0]["time"])), 8, 0.1
+            )
+            self.retime_start_spin.setValue(float(self.keyframes[0]["time"]))
+            self.retime_duration_spin = self._spin(0.01, 100.0, 4, 0.1)
+            self.retime_duration_spin.setValue(1.0)
+            retime_form.addRow("開始時間 (秒)", self.retime_start_spin)
+            retime_form.addRow("動作時間倍率", self.retime_duration_spin)
+            self.retime_button = QPushButton("全キーフレームに適用")
+            self.retime_button.clicked.connect(self._retime_all_keyframes)
+            retime_form.addRow(self.retime_button)
+            self.retime_status = QLabel(
+                "開始時間と動作時間倍率を指定すると、ポーズを変えずに全キーの時間だけ調整します。"
+            )
+            self.retime_status.setWordWrap(True)
+            retime_form.addRow(self.retime_status)
+            root.addWidget(retime_group)
 
             note = QLabel(
                 "腕の角度を変更した場合は、2D描画用のZ軸クォータニオンとして保存します。"
@@ -382,6 +433,26 @@ if QDialog is not None:
                     bones[name] = roll_quaternion(current_roll)
             if bones:
                 frame["bones"] = bones
+
+        def _retime_all_keyframes(self) -> None:
+            self._commit_current_frame()
+            try:
+                self.keyframes = retime_motion_keyframes(
+                    self.keyframes,
+                    start_time=float(self.retime_start_spin.value()),
+                    duration_scale=float(self.retime_duration_spin.value()),
+                )
+            except CharacterMotionError as exc:
+                QMessageBox.warning(self, "モーション時間を調整できません", str(exc))
+                return
+
+            selected = min(self._current_index, len(self.keyframes) - 1)
+            self._rebuild_selector(selected)
+            self.retime_start_spin.setValue(float(self.keyframes[0]["time"]))
+            self.retime_duration_spin.setValue(1.0)
+            self.retime_status.setText(
+                f"{len(self.keyframes)} 個のキーフレームの時間を更新しました。ポーズ値は変更していません。"
+            )
 
         def _add_keyframe(self, time_sec: float) -> None:
             self._commit_current_frame()

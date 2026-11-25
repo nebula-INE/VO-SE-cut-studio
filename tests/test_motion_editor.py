@@ -118,3 +118,64 @@ def test_normalize_motion_keyframes_keeps_full_float_precision():
     assert quaternion[0] == pytest.approx(0.123456789 / math.sqrt(
         0.123456789**2 + 0.234567891**2 + 0.345678912**2 + 0.456789123**2
     ))
+
+
+
+def test_retime_motion_keyframes_moves_and_scales_all_times_without_changing_poses():
+    from motion_editor import retime_motion_keyframes
+
+    original = _frames()
+    retimed = retime_motion_keyframes(
+        original,
+        start_time=2.0,
+        duration_scale=1.5,
+    )
+
+    assert [frame["time"] for frame in retimed] == pytest.approx([2.0, 3.5])
+    assert retimed[0]["head"] == original[0]["head"]
+    assert retimed[1]["head"] == original[1]["head"]
+    assert retimed[1]["blend_shapes"] == original[1]["blend_shapes"]
+    assert retimed[1]["vowels"] == original[1]["vowels"]
+    assert retimed[1]["bones"]["LeftUpperArm"] == pytest.approx(
+        original[1]["bones"]["LeftUpperArm"]
+    )
+    assert [frame["time"] for frame in original] == [0.0, 1.0]
+
+
+def test_retime_motion_keyframes_uses_first_frame_as_duration_pivot():
+    from motion_editor import retime_motion_keyframes
+
+    frames = _frames()
+    frames[0]["time"] = 3.0
+    frames[1]["time"] = 5.0
+
+    retimed = retime_motion_keyframes(
+        frames,
+        start_time=1.0,
+        duration_scale=0.5,
+    )
+
+    assert [frame["time"] for frame in retimed] == pytest.approx([1.0, 2.0])
+
+
+@pytest.mark.parametrize(
+    ("start_time", "duration_scale"),
+    [
+        (-0.1, 1.0),
+        (0.0, 0.0),
+        (0.0, -1.0),
+        (0.0, float("nan")),
+        (0.0, float("inf")),
+        (0.0, True),
+        (True, 1.0),
+    ],
+)
+def test_retime_motion_keyframes_rejects_invalid_parameters(start_time, duration_scale):
+    from motion_editor import retime_motion_keyframes
+
+    with pytest.raises(CharacterMotionError):
+        retime_motion_keyframes(
+            _frames(),
+            start_time=start_time,
+            duration_scale=duration_scale,
+        )

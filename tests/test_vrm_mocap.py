@@ -43,6 +43,7 @@ def test_vmc_blend_shapes_map_to_vrm_presets_and_clamp() -> None:
         "Sorrow": 0.5,
         "A": 0.8,
         "Blink_L": 0.6,
+        "Blink_R": 0.4,
         "UnknownCustomExpression": 1.0,
     })
     assert result == {
@@ -50,6 +51,7 @@ def test_vmc_blend_shapes_map_to_vrm_presets_and_clamp() -> None:
         "sad": 0.5,
         "aa": 0.8,
         "blinkLeft": 0.6,
+        "blinkRight": 0.4,
     }
 
 

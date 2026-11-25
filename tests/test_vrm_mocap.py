@@ -11,6 +11,7 @@ from vrm_mocap import normalize_blend_shapes, normalize_quaternion, vmc_bone_to_
     ("vmc_name", "expected"),
     [
         ("Head", "head"),
+        ("Hips", "hips"),
         ("LeftUpperArm", "leftUpperArm"),
         ("RightLowerLeg", "rightLowerLeg"),
         ("LeftIndexIntermediate", "leftIndexIntermediate"),

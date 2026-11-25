@@ -149,6 +149,8 @@ class VRMViewerWidget(QWidget):
                 daemon=True,
             )
             thread.start()
+            self._server = server
+            self._server_thread = thread
             address, port = server.server_address
 
             web_view = QWebEngineView(self)
@@ -165,8 +167,6 @@ class VRMViewerWidget(QWidget):
             web_view.titleChanged.connect(self._on_page_title_changed)
             web_view.loadFinished.connect(self._on_page_loaded)
 
-            self._server = server
-            self._server_thread = thread
             self._viewer_origin = f"http://{address}:{port}"
             self._web_view = web_view
             self._layout.insertWidget(1, web_view, stretch=1)

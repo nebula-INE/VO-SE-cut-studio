@@ -2386,6 +2386,10 @@ def main() -> int:
             print("VO-SE native library was not found in the application bundle", file=sys.stderr)
             return 2
         try:
+            if not _VRM_VIEWER_AVAILABLE:
+                raise RuntimeError(
+                    "Qt WebEngine VRM preview is unavailable in this application bundle"
+                )
             from vose_engine import VoseEngine
 
             version = VoseEngine(library_path).get_engine_version()
@@ -2410,6 +2414,7 @@ def main() -> int:
         print(f"Axral Cut Studio runtime OK; VO-SE engine {version:g}")
         print(f"FFmpeg: {ffmpeg}")
         print(f"FFprobe: {ffprobe}")
+        print("VRM preview: Qt WebEngine module import OK")
         return 0
 
     app = QApplication(sys.argv)

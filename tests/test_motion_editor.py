@@ -128,7 +128,7 @@ def test_retime_motion_keyframes_moves_and_scales_all_times_without_changing_pos
     retimed = retime_motion_keyframes(
         original,
         start_time=2.0,
-        speed_scale=1.5,
+        duration_scale=1.5,
     )
 
     assert [frame["time"] for frame in retimed] == pytest.approx([2.0, 3.5])
@@ -152,14 +152,14 @@ def test_retime_motion_keyframes_uses_first_frame_as_speed_pivot():
     retimed = retime_motion_keyframes(
         frames,
         start_time=1.0,
-        speed_scale=0.5,
+        duration_scale=0.5,
     )
 
     assert [frame["time"] for frame in retimed] == pytest.approx([1.0, 2.0])
 
 
 @pytest.mark.parametrize(
-    ("start_time", "speed_scale"),
+    ("start_time", "duration_scale"),
     [
         (-0.1, 1.0),
         (0.0, 0.0),
@@ -170,12 +170,12 @@ def test_retime_motion_keyframes_uses_first_frame_as_speed_pivot():
         (True, 1.0),
     ],
 )
-def test_retime_motion_keyframes_rejects_invalid_parameters(start_time, speed_scale):
+def test_retime_motion_keyframes_rejects_invalid_parameters(start_time, duration_scale):
     from motion_editor import retime_motion_keyframes
 
     with pytest.raises(CharacterMotionError):
         retime_motion_keyframes(
             _frames(),
             start_time=start_time,
-            speed_scale=speed_scale,
+            duration_scale=duration_scale,
         )

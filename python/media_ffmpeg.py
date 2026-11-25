@@ -1,6 +1,7 @@
 """FFmpeg CLI integration for audio decoding and lossless-video muxing."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -228,3 +229,108 @@ def mux_audio_into_video(
         audio_codec="aac",
         audio_bitrate=audio_bitrate,
     )
+
+
+
+def find_ffprobe_executable(
+    ffprobe_path: str | Path | None = None,
+    *,
+    ffmpeg_path: str | Path | None = None,
+) -> str:
+    """Find FFprobe beside FFmpeg, on PATH, or in common bundled locations."""
+    candidates: list[str | Path] = []
+    if ffprobe_path is not None:
+        candidates.append(ffprobe_path)
+    environment_path = os.environ.get("FFPROBE_BINARY")
+    if environment_path:
+        candidates.append(environment_path)
+
+    ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    try:
+        ffmpeg_executable = find_ffmpeg_executable(ffmpeg_path)
+    except MediaToolError:
+        ffmpeg_executable = None
+    if ffmpeg_executable:
+        candidates.append(Path(ffmpeg_executable).with_name(ffprobe_name))
+
+    located = shutil.which(ffprobe_name)
+    if located:
+        candidates.append(located)
+
+    module_root = Path(__file__).resolve().parent.parent
+    directories = [
+        Path(sys.executable).resolve().parent,
+        module_root / "bin",
+        module_root / "tools" / "ffmpeg" / "bin",
+        module_root / "build",
+        module_root / "build" / "Release",
+        module_root / "vcpkg" / "installed" / "x64-windows" / "tools" / "ffmpeg",
+        module_root / "vcpkg_installed" / "x64-windows" / "tools" / "ffmpeg",
+        module_root / "vcpkg_installed" / "x64-windows" / "tools" / "ffmpeg" / "bin",
+    ]
+    for directory in directories:
+        candidates.append(directory / ffprobe_name)
+
+    for candidate in candidates:
+        candidate_text = str(candidate)
+        located_candidate = shutil.which(candidate_text)
+        if located_candidate:
+            return str(Path(located_candidate).resolve())
+        path = Path(candidate_text).expanduser()
+        if path.is_file():
+            return str(path.resolve())
+
+    if ffprobe_path is not None:
+        raise MediaToolError(f"指定されたFFprobe実行ファイルが見つかりません: {ffprobe_path}")
+    raise MediaToolError(
+        "FFprobe実行ファイルが見つかりません。通常はFFmpegと同じ配布物に含まれます。"
+        "FFPROBE_BINARY に実行ファイルのパスを設定することもできます。"
+    )
+
+
+def probe_video_dimensions(
+    video_path: str | Path,
+    *,
+    ffprobe_path: str | Path | None = None,
+    ffmpeg_path: str | Path | None = None,
+) -> tuple[int, int]:
+    """Read the first video stream dimensions using FFprobe JSON output."""
+    source = Path(video_path).expanduser().resolve()
+    if not source.is_file():
+        raise MediaToolError(f"動画素材が見つかりません: {source}")
+    executable = find_ffprobe_executable(ffprobe_path, ffmpeg_path=ffmpeg_path)
+    command = [
+        executable,
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "json",
+        str(source),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise MediaToolError(f"FFprobeを起動できませんでした: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip()
+        raise MediaToolError(
+            f"動画の解像度を取得できませんでした: {source}"
+            + (f"\n{detail}" if detail else "")
+        )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+        streams = payload.get("streams", [])
+        stream = streams[0] if streams else {}
+        width = int(stream["width"])
+        height = int(stream["height"])
+    except (TypeError, ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise MediaToolError(f"動画の解像度情報が不正です: {source}") from exc
+    if width <= 0 or height <= 0:
+        raise MediaToolError(f"動画の解像度が不正です: {width}x{height}")
+    return width, height

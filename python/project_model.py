@@ -25,7 +25,7 @@ from typing import Any
 PROJECT_FORMAT = "aural-studio-project"
 PROJECT_SCHEMA_VERSION = 1
 PROJECT_SUFFIX = ".auralproj"
-ASSET_KINDS = frozenset({"video", "audio", "image", "character", "voicebank", "other"})
+ASSET_KINDS = frozenset({"video", "audio", "image", "character", "motion", "voicebank", "other"})
 
 
 class ProjectError(ValueError):

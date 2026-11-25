@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# Avoid spending runners on obsolete package builds after a newer PR commit arrives.
+concurrency:
+  group: axral-cut-studio-package-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   AXRAL_PACKAGE_VERSION: 0.1.${{ github.run_number }}
 

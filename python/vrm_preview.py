@@ -294,7 +294,12 @@ class VRMViewerWidget(QWidget):
         if thread is not None and thread.is_alive():
             thread.join(timeout=1.0)
 
-    def closeEvent(self, event) -> None:
+    def shutdown(self) -> None:
+        """Stop WebEngine activity and release the loopback-only HTTP server."""
         self._state_timer.stop()
+        self.web_view.stop()
         self._stop_server()
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
         super().closeEvent(event)

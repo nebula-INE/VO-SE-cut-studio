@@ -41,3 +41,4 @@ Categories=AudioVideo;Audio;Video;Editing;
 EOF
 
 dpkg-deb --build --root-owner-group "$STAGE" "$ROOT/release/axral-cut-studio-$VERSION-$ARCH.deb"
+rm -rf "$STAGE"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="$AXRAL_PACKAGE_VERSION"
+VERSION="$(printenv AXRAL_PACKAGE_VERSION || true)"
 if [[ -z "$VERSION" ]]; then VERSION="0.1.0"; fi
 ARCH="$(dpkg --print-architecture)"
 PACKAGE="axral-cut-studio"

@@ -107,7 +107,14 @@ target_link_libraries(vose_core PRIVATE Threads::Threads)
 # 拡張子・prefixをプラットフォーム標準に合わせつつ、Python(ctypes)側の
 # デフォルト読み込みパス(python/vose_engine.pyの_default_lib_name)と
 # 名前が一致するようにする。
+if(WIN32)
+    # Windows ctypes convention uses vose_core.dll (without a lib prefix).
+    set(VOSE_CORE_PREFIX "")
+else()
+    set(VOSE_CORE_PREFIX "lib")
+endif()
+
 set_target_properties(vose_core PROPERTIES
-    PREFIX "lib"
+    PREFIX "${VOSE_CORE_PREFIX}"
     OUTPUT_NAME "vose_core"
 )

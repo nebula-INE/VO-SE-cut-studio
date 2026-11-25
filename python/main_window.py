@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import platform
+import subprocess
 import sys
 import tempfile
 import time
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from preview import PreviewPanel
+from runtime_paths import find_runtime_file
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
@@ -45,6 +47,7 @@ from timeline_audio_render import (
 from media_ffmpeg import (
     MediaToolError,
     find_ffmpeg_executable,
+    find_ffprobe_executable,
     mux_audio_into_video,
 )
 from timeline_video_render import (
@@ -157,19 +160,23 @@ class _MocapBridge(QObject):
 
 
 def _default_vose_lib_path() -> str | None:
-    """CMakeビルドで生成されるlibvose_core(.so/.dylib/.dll)を、このファイルから
-    見て ../build/ 相対で探す。見つからなければNoneを返す(音声合成ボタンは
-    無効化された状態でGUIは起動できる)。
-    """
+    """Find VO-SE's native library in a frozen bundle or a source build tree."""
     system = platform.system()
-    filename = {"Windows": "vose_core.dll", "Darwin": "libvose_core.dylib"}.get(system, "libvose_core.so")
+    if system == "Windows":
+        filenames = ("vose_core.dll", "libvose_core.dll")
+    elif system == "Darwin":
+        filenames = ("libvose_core.dylib",)
+    else:
+        filenames = ("libvose_core.so",)
 
-    build_dir = Path(__file__).resolve().parent.parent / "build"
-    # MSVCのマルチ構成ジェネレータは build/Release/ 配下に出力する
-    for candidate in (build_dir / filename, build_dir / "Release" / filename):
-        if candidate.exists():
-            return str(candidate)
-    return None
+    candidate = find_runtime_file(
+        filenames,
+        module_file=__file__,
+        executable=sys.executable,
+        frozen_root=getattr(sys, "_MEIPASS", None),
+        subdirectories=("native", "build", "build/Release"),
+    )
+    return str(candidate) if candidate is not None else None
 
 
 class _TimelineAudioRenderSignals(QObject):
@@ -341,7 +348,7 @@ class _TimelineFullVideoExportTask(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("aural Studio")
+        self.setWindowTitle("Axral Cut Studio")
         self.resize(1280, 800)
 
         self.preview_panel = PreviewPanel()
@@ -2337,6 +2344,38 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    if "--runtime-check" in sys.argv[1:]:
+        library_path = _default_vose_lib_path()
+        if library_path is None:
+            print("VO-SE native library was not found in the application bundle", file=sys.stderr)
+            return 2
+        try:
+            from vose_engine import VoseEngine
+
+            version = VoseEngine(library_path).get_engine_version()
+            ffmpeg = find_ffmpeg_executable()
+            ffprobe = find_ffprobe_executable(ffmpeg_path=ffmpeg)
+            for tool_path in (ffmpeg, ffprobe):
+                result = subprocess.run(
+                    [tool_path, "-version"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    raise RuntimeError(
+                        f"{Path(tool_path).name} could not start successfully: {detail}"
+                    )
+        except Exception as exc:
+            print(f"Runtime validation failed: {exc}", file=sys.stderr)
+            return 3
+        print(f"Axral Cut Studio runtime OK; VO-SE engine {version:g}")
+        print(f"FFmpeg: {ffmpeg}")
+        print(f"FFprobe: {ffprobe}")
+        return 0
+
     app = QApplication(sys.argv)
     window = MainWindow()
 

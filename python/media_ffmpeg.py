@@ -10,6 +10,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from runtime_paths import find_runtime_file
+
 
 class MediaToolError(RuntimeError):
     """Raised when the FFmpeg executable or a media operation is unavailable."""
@@ -33,6 +35,15 @@ def find_ffmpeg_executable(ffmpeg_path: str | Path | None = None) -> str:
         candidates.append(environment_path)
 
     executable_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    bundled = find_runtime_file(
+        (executable_name, "ffmpeg" if os.name == "nt" else executable_name),
+        module_file=__file__,
+        executable=sys.executable,
+        frozen_root=getattr(sys, "_MEIPASS", None),
+        subdirectories=("bin",),
+    )
+    if bundled is not None:
+        candidates.append(bundled)
     located = shutil.which(executable_name)
     if located:
         candidates.append(located)
@@ -43,6 +54,11 @@ def find_ffmpeg_executable(ffmpeg_path: str | Path | None = None) -> str:
         executable_names.append("ffmpeg")
     directories = [
         Path(sys.executable).resolve().parent,
+        *((
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+            Path("/opt/local/bin"),
+        ) if sys.platform == "darwin" else ()),
         module_root / "bin",
         module_root / "tools" / "ffmpeg" / "bin",
         module_root / "build",
@@ -246,6 +262,15 @@ def find_ffprobe_executable(
         candidates.append(environment_path)
 
     ffprobe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    bundled = find_runtime_file(
+        (ffprobe_name, "ffprobe" if os.name == "nt" else ffprobe_name),
+        module_file=__file__,
+        executable=sys.executable,
+        frozen_root=getattr(sys, "_MEIPASS", None),
+        subdirectories=("bin",),
+    )
+    if bundled is not None:
+        candidates.append(bundled)
     try:
         ffmpeg_executable = find_ffmpeg_executable(ffmpeg_path)
     except MediaToolError:
@@ -260,6 +285,11 @@ def find_ffprobe_executable(
     module_root = Path(__file__).resolve().parent.parent
     directories = [
         Path(sys.executable).resolve().parent,
+        *((
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+            Path("/opt/local/bin"),
+        ) if sys.platform == "darwin" else ()),
         module_root / "bin",
         module_root / "tools" / "ffmpeg" / "bin",
         module_root / "build",

@@ -73,6 +73,11 @@ extern "C" {
     // 1. 音源をメモリにパッキングする（内蔵音源化の必須関数）
     DLLEXPORT void load_embedded_resource(const char* phoneme, const int16_t* raw_data, int sample_count);
 
+    // Extended API: preserve the source WAV sample rate and normalize to the engine rate.
+    // The original 3-argument symbol remains available for ABI compatibility (44.1kHz input).
+    DLLEXPORT void load_embedded_resource_ex(
+        const char* phoneme, const int16_t* raw_data, int sample_count, int sample_rate);
+
     // 2. レンダリング実行関数
     DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* output_path, int mode_flag);
 

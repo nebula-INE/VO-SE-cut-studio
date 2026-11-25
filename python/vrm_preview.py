@@ -252,14 +252,37 @@ class VRMViewerWidget(QWidget):
     def set_bone_transform(
         self, bone_name: str, qx: float, qy: float, qz: float, qw: float
     ) -> None:
+        """Compatibility entry point for rotation-only sources."""
+        self.set_bone_transform_3d(bone_name, 0.0, 0.0, 0.0, qx, qy, qz, qw)
+
+    def set_bone_transform_3d(
+        self,
+        bone_name: str,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
         normalized_name = vmc_bone_to_vrm(bone_name)
         if normalized_name is None or normalized_name == "head":
             return
         try:
+            position = tuple(float(v) for v in (x, y, z))
             rotation = normalize_quaternion((qx, qy, qz, qw))
+            if not all(math.isfinite(v) for v in position):
+                return
         except (TypeError, ValueError, OverflowError):
             return
-        self._bones[normalized_name] = {"rotation": rotation}
+        transform = {"rotation": rotation}
+        # VMC bone positions are world/model positions. Only the root Hips
+        # translation is applied; child positions would overwrite each VRM's
+        # own bone lengths and hierarchy. Other mapped bones receive rotation.
+        if normalized_name == "hips":
+            transform["position"] = position
+        self._bones[normalized_name] = transform
 
     def set_blend_shapes(self, values: dict) -> None:
         try:

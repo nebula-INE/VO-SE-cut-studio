@@ -128,6 +128,22 @@ class VideoPreviewWidget(QLabel):
         self._bones[name] = (qx, qy, qz, qw)
         self._redraw()
 
+    def set_motion_state(self, state: dict) -> None:
+        """Apply a complete timeline motion sample in one redraw."""
+        head = state.get("head", {})
+        self._character_enabled = True
+        self._mouth_openness = max(0.0, min(1.0, float(state.get("mouth_openness", 0.0))))
+        self._head_offset_x = float(head.get("x", 0.0))
+        self._head_offset_y = float(head.get("y", 0.0))
+        self._head_tilt_deg = float(head.get("tilt_deg", 0.0))
+        self._blend_shapes = dict(state.get("blend_shapes", {}))
+        self._vowels = dict(state.get("vowels", {}))
+        self._bones = {
+            name: tuple(float(component) for component in quaternion)
+            for name, quaternion in state.get("bones", {}).items()
+        }
+        self._redraw()
+
     def set_character_visible(self, visible: bool) -> None:
         """2Dキャラクターの表示/非表示(モード切り替え用)。"""
         self._character_visible = visible
@@ -409,6 +425,10 @@ class PreviewPanel(QWidget):
     def set_bone_transform(self, name: str, qx: float, qy: float, qz: float, qw: float) -> None:
         """Head以外のボーン(腕など)の回転を映像上のキャラクターに反映する。"""
         self.preview.set_bone_transform(name, qx, qy, qz, qw)
+
+    def set_motion_state(self, state: dict) -> None:
+        """Apply an interpolated timeline motion state to the character overlay."""
+        self.preview.set_motion_state(state)
 
     def set_character_visible(self, visible: bool) -> None:
         self.preview.set_character_visible(visible)

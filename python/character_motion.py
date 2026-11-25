@@ -106,6 +106,21 @@ def _normalize_keyframe(raw: Any, index: int) -> dict[str, Any]:
     return result
 
 
+def normalize_motion_keyframes(keyframes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate, normalize, and sort an in-memory motion keyframe list."""
+    if not isinstance(keyframes, list) or not keyframes:
+        raise CharacterMotionError("Motion document must contain at least one keyframe")
+    normalized = [
+        _normalize_keyframe(frame, index)
+        for index, frame in enumerate(keyframes)
+    ]
+    normalized.sort(key=lambda frame: frame["time"])
+    times = [frame["time"] for frame in normalized]
+    if len(times) != len(set(times)):
+        raise CharacterMotionError("Motion keyframe times must be unique")
+    return normalized
+
+
 def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
     """Load and validate an aural-motion v1 JSON file."""
     source = Path(path).expanduser()
@@ -129,12 +144,7 @@ def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
     if not isinstance(frames, list) or not frames:
         raise CharacterMotionError("Motion file must contain at least one keyframe")
 
-    normalized = [_normalize_keyframe(frame, index) for index, frame in enumerate(frames)]
-    normalized.sort(key=lambda frame: frame["time"])
-    times = [frame["time"] for frame in normalized]
-    if len(times) != len(set(times)):
-        raise CharacterMotionError("Motion keyframe times must be unique")
-    return normalized
+    return normalize_motion_keyframes(frames)
 
 
 def _lerp(left: float, right: float, amount: float) -> float:
@@ -238,16 +248,7 @@ def motion_duration(keyframes: list[dict[str, Any]]) -> float:
 def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
     """Validate and atomically save an aural-motion v1 JSON file."""
     destination = Path(path).expanduser()
-    if not isinstance(keyframes, list) or not keyframes:
-        raise CharacterMotionError("Motion recording must contain at least one keyframe")
-    normalized = [
-        _normalize_keyframe(frame, index)
-        for index, frame in enumerate(keyframes)
-    ]
-    normalized.sort(key=lambda frame: frame["time"])
-    times = [frame["time"] for frame in normalized]
-    if len(times) != len(set(times)):
-        raise CharacterMotionError("Motion keyframe times must be unique")
+    normalized = normalize_motion_keyframes(keyframes)
     payload = {
         "format": MOTION_FORMAT,
         "version": MOTION_VERSION,

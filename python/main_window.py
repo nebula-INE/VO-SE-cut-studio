@@ -54,7 +54,7 @@ from timeline_video_render import (
     timeline_motion_clips,
     timeline_video_clips,
 )
-from character_motion import CharacterMotionError, load_motion_file, sample_motion, save_motion_file
+from character_motion import CharacterMotionError, load_motion_file, save_motion_file
 from timeline_motion_preview import TimelineMotionPreviewError, timeline_motion_state_at
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,

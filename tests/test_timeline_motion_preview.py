@@ -47,11 +47,11 @@ def test_timeline_motion_preview_uses_clip_source_in_and_interpolation():
         loaded.append(clip.id)
         return _keyframes()
 
-    state = timeline_motion_state_at(model, 2.25, load)
+    state = timeline_motion_state_at(model, 2.0, load)
 
     assert loaded == [motion_clip.id]
-    assert state["head"]["x"] == pytest.approx(1.0)
-    assert state["head"]["tilt_deg"] == pytest.approx(20.0)
+    assert state["head"]["x"] == pytest.approx(0.75)
+    assert state["head"]["tilt_deg"] == pytest.approx(15.0)
 
 
 @pytest.mark.parametrize(

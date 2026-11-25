@@ -490,6 +490,8 @@ class MainWindow(QMainWindow):
         timeline_menu.addSeparator()
         caption_action = timeline_menu.addAction("台本字幕をタイムラインに配置")
         caption_action.triggered.connect(self.add_script_lines_to_timeline)
+        character_action = timeline_menu.addAction("2Dキャラクタークリップを追加...")
+        character_action.triggered.connect(self.add_2d_character_clip)
         timeline_menu.addSeparator()
         self._export_audio_mix_action = timeline_menu.addAction("音声ミックスをWAVに書き出す...")
         self._export_audio_mix_action.triggered.connect(self.export_timeline_audio_mix)
@@ -1556,7 +1558,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "タイムラインMP4書き出し",
-                "表示中で有効な動画・静止画クリップがありません。",
+                "表示中で有効な動画・静止画・字幕・キャラクタークリップがありません。",
             )
             return
 
@@ -1642,6 +1644,8 @@ class MainWindow(QMainWindow):
             f"保存先: {result['output_path']}\\n"
             f"映像・静止画: {result['video_clip_count']} クリップ / "
             f"字幕: {result['subtitle_clip_count']} クリップ / "
+            f"2Dキャラクター: {result['character_clip_count']} クリップ / "
+            f"モーション: {result['motion_clip_count']} クリップ / "
             f"音声: {result['audio_clip_count']} クリップ\\n"
             f"解像度: {result['width']}×{result['height']} / "
             f"{result['frame_rate']:g} fps / {result['duration_seconds']:.2f} 秒"
@@ -1662,6 +1666,49 @@ class MainWindow(QMainWindow):
         self._finish_timeline_full_video_export()
         QMessageBox.critical(self, "タイムラインMP4書き出しに失敗しました", message)
         self.statusBar().showMessage("タイムラインMP4書き出しに失敗しました", 8000)
+
+    def add_2d_character_clip(self) -> None:
+        """Add the built-in 2D placeholder character to the overlay track."""
+        tracks = [
+            track for track in self.timeline_panel.model.tracks
+            if track.kind == "overlay" and not track.locked
+        ]
+        if not tracks:
+            index = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == "overlay"
+            )
+            tracks = [
+                self.timeline_panel.model.add_track(f"Overlay {index}", "overlay")
+            ]
+        duration, accepted = QInputDialog.getDouble(
+            self,
+            "2Dキャラクターを追加",
+            "表示時間 (秒):",
+            5.0,
+            0.05,
+            3600.0,
+            2,
+        )
+        if not accepted:
+            return
+        try:
+            self.timeline_panel.model.add_clip(
+                tracks[0].id,
+                "character",
+                "2D Character",
+                duration,
+                start=self.timeline_panel.playhead_seconds,
+                script_line_id=BUILTIN_2D_CHARACTER_ID,
+            )
+        except TimelineError as exc:
+            QMessageBox.warning(self, "キャラクター追加エラー", str(exc))
+            return
+        self.timeline_panel.refresh()
+        self._mark_project_dirty()
+        self.statusBar().showMessage(
+            "2Dプレースホルダーキャラクターをタイムラインに追加しました",
+            5000,
+        )
 
     def add_script_lines_to_timeline(self) -> None:
         """Place script lines on an overlay track as linked text clips.
@@ -1736,6 +1783,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "トラック追加エラー", str(exc))
 
     def _asset_default_duration(self, asset) -> float:
+        if asset.kind == "motion":
+            try:
+                from character_motion import load_motion_file, motion_duration
+                duration = motion_duration(load_motion_file(self._project.resolve_asset(asset)))
+                if duration >= 0.05:
+                    return duration
+            except (OSError, ValueError, ProjectError):
+                pass
+            return 5.0
         if asset.kind == "video":
             active_id = self._project.settings.get("active_video_asset_id")
             if active_id == asset.id and self.preview_panel.decoder is not None:
@@ -1758,7 +1814,7 @@ class MainWindow(QMainWindow):
     def add_timeline_clip_from_assets(self) -> None:
         available = [
             asset for asset in self._project.assets
-            if asset.kind in {"video", "audio", "image", "character", "other"}
+            if asset.kind in {"video", "audio", "image", "character", "motion", "other"}
         ]
         if not available:
             QMessageBox.information(
@@ -1781,6 +1837,7 @@ class MainWindow(QMainWindow):
             "audio": ("audio", "audio"),
             "image": ("image", "overlay"),
             "character": ("character", "overlay"),
+            "motion": ("motion", "motion"),
             "other": ("other", "other"),
         }
         clip_kind, track_kind = mapping[asset.kind]
@@ -1878,6 +1935,8 @@ class MainWindow(QMainWindow):
             return "audio"
         if extension in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}:
             return "image"
+        if Path(path).name.lower().endswith(".motion.json"):
+            return "motion"
         if extension in {".vrm", ".vmd", ".fbx", ".obj", ".glb", ".gltf"}:
             return "character"
         return "other"
@@ -1898,7 +1957,7 @@ class MainWindow(QMainWindow):
             self,
             "プロジェクトに追加する素材を選択",
             "",
-            "メディア/素材 (*.mp4 *.mov *.mkv *.avi *.webm *.wav *.mp3 *.flac *.aac *.m4a *.ogg *.png *.jpg *.jpeg *.webp *.bmp *.vrm *.vmd *.fbx *.obj *.glb *.gltf);;すべてのファイル (*)",
+            "メディア/素材 (*.mp4 *.mov *.mkv *.avi *.webm *.wav *.mp3 *.flac *.aac *.m4a *.ogg *.png *.jpg *.jpeg *.webp *.bmp *.vrm *.vmd *.fbx *.obj *.glb *.gltf *.motion.json);;すべてのファイル (*)",
         )
         if not path:
             return

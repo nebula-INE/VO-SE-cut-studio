@@ -28,7 +28,9 @@ before running PyInstaller.
 The loader accepts VRM 0.x and VRM 1.0 files. MToon rendering, spring-bone
 updates, humanoid nodes, and VRM expression presets are handled by three-vrm.
 The current VMC mapping covers the common humanoid body, arm, leg, eye, jaw,
-and finger bones. Unknown bone/expression names are ignored safely.
+and finger bones. VMC root (Hips) translation is applied without replacing
+the model's own child-bone lengths; head-only sources continue to work without
+a root-bone stream. Unknown bone/expression names are ignored safely.
 
 ## Current scope
 

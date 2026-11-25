@@ -25,6 +25,7 @@ from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRunnable, QThreadPool
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QMainWindow,
@@ -56,6 +57,7 @@ from timeline_video_render import (
 )
 from character_motion import CharacterMotionError, load_motion_file, save_motion_file
 from timeline_motion_preview import TimelineMotionPreviewError, timeline_motion_state_at
+from motion_editor import MotionKeyframeEditorDialog
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
     MAX_RECORDING_SECONDS,
@@ -520,6 +522,8 @@ class MainWindow(QMainWindow):
         caption_action.triggered.connect(self.add_script_lines_to_timeline)
         character_action = timeline_menu.addAction("2Dキャラクタークリップを追加...")
         character_action.triggered.connect(self.add_2d_character_clip)
+        motion_edit_action = timeline_menu.addAction("選択モーションのキーフレームを編集...")
+        motion_edit_action.triggered.connect(self.edit_selected_motion_keyframes)
         timeline_menu.addSeparator()
         self._export_audio_mix_action = timeline_menu.addAction("音声ミックスをWAVに書き出す...")
         self._export_audio_mix_action.triggered.connect(self.export_timeline_audio_mix)
@@ -1079,6 +1083,94 @@ class MainWindow(QMainWindow):
 
         self._timeline_motion_preview_active = True
         self.preview_panel.set_motion_state(state)
+
+    def edit_selected_motion_keyframes(self) -> None:
+        """Edit the selected Motion clip and save the result into project-managed storage."""
+        clip = self.timeline_panel.model.get_clip(
+            self.timeline_panel.selected_clip_id or ""
+        )
+        if clip is None or clip.kind != "motion" or clip.asset_id is None:
+            QMessageBox.information(
+                self,
+                "モーション編集",
+                "タイムライン上のMotionクリップを選択してください。",
+            )
+            return
+        track = self.timeline_panel.model.get_track(clip.track_id)
+        if track is None or track.locked:
+            QMessageBox.information(
+                self, "モーション編集", "ロックされたMotionトラックは編集できません。"
+            )
+            return
+        asset = self._project.get_asset(clip.asset_id)
+        if asset is None or asset.kind != "motion":
+            QMessageBox.warning(
+                self, "モーション編集", "選択したクリップのモーション素材が見つかりません。"
+            )
+            return
+
+        try:
+            source_path = self._project.resolve_asset(asset)
+            keyframes = load_motion_file(source_path)
+        except (OSError, ProjectError, CharacterMotionError) as exc:
+            QMessageBox.warning(
+                self, "モーションを読み込めません", str(exc)
+            )
+            return
+
+        timeline_offset = min(
+            clip.duration,
+            max(0.0, self.timeline_panel.playhead_seconds - clip.start),
+        )
+        source_insert_time = clip.source_in + timeline_offset
+        dialog = MotionKeyframeEditorDialog(keyframes, source_insert_time, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        if self._project.file_path is None and not self.save_project_as():
+            return
+
+        try:
+            # Promote linked motion files to a project-managed copy before editing.
+            # This prevents an edit from unexpectedly overwriting the user's source file.
+            current_asset = self._project.get_asset(clip.asset_id)
+            if current_asset is None:
+                raise ProjectError("モーション素材の参照が失われました")
+            current_path = self._project.resolve_asset(current_asset)
+            managed_asset = self._project.add_asset(
+                current_path,
+                "motion",
+                copy_into_project=True,
+            )
+            destination = self._project.resolve_asset(managed_asset)
+            save_motion_file(destination, dialog.keyframes)
+            managed_asset.size_bytes = destination.stat().st_size
+            clip.asset_id = managed_asset.id
+
+            edited_source_duration = float(dialog.keyframes[-1]["time"])
+            required_duration = max(0.05, edited_source_duration - clip.source_in)
+            if required_duration > clip.duration:
+                clip.duration = required_duration
+
+            self._motion_preview_cache.pop(managed_asset.id, None)
+            self.timeline_panel.refresh()
+            self._mark_project_dirty()
+            self._update_timeline_motion_preview(
+                self.timeline_panel.playhead_seconds
+            )
+            if self.save_project():
+                self.statusBar().showMessage(
+                    f"モーションを保存しました: {managed_asset.name}", 7000
+                )
+            else:
+                self.statusBar().showMessage(
+                    "モーション素材は更新しましたが、プロジェクトファイルの保存は未完了です。",
+                    9000,
+                )
+        except (OSError, ProjectError, CharacterMotionError, ValueError) as exc:
+            QMessageBox.critical(
+                self, "モーション保存エラー", f"編集内容を保存できませんでした: {exc}"
+            )
 
     def _video_clip_at(self, timeline_seconds: float):
         candidates = [

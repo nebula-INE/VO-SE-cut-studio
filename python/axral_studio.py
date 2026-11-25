@@ -10,24 +10,34 @@ _DLL_DIRECTORY_HANDLES: list[object] = []
 
 
 def configure_runtime_search_paths() -> None:
-    """Expose bundled native libraries and command-line tools to the OS loader."""
-    roots: list[Path] = []
+    """Expose bundled or source-build native libraries to the OS loader."""
     frozen_root = getattr(sys, "_MEIPASS", None)
+    directories: list[Path] = []
     if frozen_root:
-        roots.append(Path(frozen_root))
-    roots.append(Path(sys.executable).resolve().parent)
+        bundle = Path(frozen_root)
+        directories.extend((bundle / "native", bundle / "bin"))
+    directories.append(Path(sys.executable).resolve().parent)
+
+    if not getattr(sys, "frozen", False):
+        source_root = Path(__file__).resolve().parent.parent
+        directories.extend((
+            source_root / "build",
+            source_root / "build" / "Release",
+            source_root / "vcpkg" / "installed" / "x64-windows" / "bin",
+            source_root / "vcpkg_installed" / "x64-windows" / "bin",
+        ))
 
     search_paths: list[str] = []
-    for root in roots:
-        for child in ("native", "bin"):
-            directory = root / child
-            if directory.is_dir():
-                value = str(directory.resolve())
-                if value not in search_paths:
-                    search_paths.append(value)
-                if os.name == "nt" and hasattr(os, "add_dll_directory"):
-                    # Keep the handle alive; closing it removes the DLL search path.
-                    _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(value))
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        value = str(directory.resolve())
+        if value in search_paths:
+            continue
+        search_paths.append(value)
+        if os.name == "nt" and hasattr(os, "add_dll_directory"):
+            # Keep the handle alive; closing it removes the DLL search path.
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(value))
 
     if search_paths:
         existing = os.environ.get("PATH", "")
@@ -41,6 +51,12 @@ def main() -> int:
     source_dir = Path(__file__).resolve().parent
     if str(source_dir) not in sys.path:
         sys.path.insert(0, str(source_dir))
+
+    if not getattr(sys, "frozen", False):
+        source_root = source_dir.parent
+        for build_dir in (source_root / "build" / "Release", source_root / "build"):
+            if build_dir.is_dir() and str(build_dir) not in sys.path:
+                sys.path.insert(0, str(build_dir))
 
     from main_window import main as run_main
 

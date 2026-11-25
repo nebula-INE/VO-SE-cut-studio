@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import platform
+import subprocess
 import sys
 import tempfile
 import time
@@ -2354,6 +2355,19 @@ def main() -> int:
             version = VoseEngine(library_path).get_engine_version()
             ffmpeg = find_ffmpeg_executable()
             ffprobe = find_ffprobe_executable(ffmpeg_path=ffmpeg)
+            for tool_path in (ffmpeg, ffprobe):
+                result = subprocess.run(
+                    [tool_path, "-version"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    raise RuntimeError(
+                        f"{Path(tool_path).name} could not start successfully: {detail}"
+                    )
         except Exception as exc:
             print(f"Runtime validation failed: {exc}", file=sys.stderr)
             return 3

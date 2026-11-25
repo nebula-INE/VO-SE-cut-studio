@@ -44,6 +44,7 @@ jobs:
         working-directory: web/vrm_viewer
         run: |
           npm install --no-audit --no-fund
+          npm run check
           npm run build
 
       - name: Set up Python

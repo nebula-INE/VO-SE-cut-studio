@@ -28,7 +28,7 @@ python scripts/package_application.py
 
 - この段階ではWindowsのコード署名、macOSのDeveloper ID署名・Notarizationは行いません。署名のないmacOSアプリはGatekeeperの警告対象になる場合があります。
 - macOSはQt同梱FFmpegとの共有ライブラリ衝突を避けるため、FFmpeg/FFprobe CLIをアプリ内にコピーしません。動画・圧縮音声機能を使う場合はHomebrewで `brew install ffmpeg` を実行してください。アプリはHomebrewの標準パス（Apple Silicon: `/opt/homebrew/bin`、Intel: `/usr/local/bin`）も検索します。
-- macOSアプリ生成時は `fix_macos_ffmpeg_rpaths.py` がPyInstallerのFrameworks直下にある外部dylibを `AxralNative/` に隔離し、Homebrew FFmpegで重複排除されたFFmpeg dylibもコピーします。拡張モジュールからは `@loader_path/AxralNative/`、隔離したdylib同士は `@loader_path/` で参照するようMach-Oの依存先を修正し、最後にアプリを再署名します。これによりPySide6/Qt配下の同名FFmpeg dylibとABIが混ざらないようにします。
+- macOSアプリ生成時は `fix_macos_ffmpeg_rpaths.py` が `aural_engine` のFFmpegロードコマンドから依存関係をたどり、FFmpegとその推移依存だけを `AxralNative/` にコピーします。拡張モジュールからは `@loader_path/AxralNative/`、隔離したdylib同士は `@loader_path/` で参照するようMach-Oの依存先を修正してからアプリを再署名します。PySide6/Shiboken/Qtのライブラリは元の位置に残すため、Qt側のローダー構成を壊しません。
 - Windowsはx64、Linuxはx86_64/amd64でビルドします。macOSはGitHub ActionsランナーのCPUアーキテクチャに対応するビルドです。
 - Linux `.deb` はFFmpegとQtのX11/OpenGL/PulseAudio実行時ライブラリをAPT依存として宣言します。`.tar.gz` は同じOS依存関係を持つ環境向けです。
 - LinuxのPyInstaller成果物はビルド時のglibcとの互換性に依存します。配布先の最小サポートOSを確定した後、より古い基準イメージでのビルドへ固定します。

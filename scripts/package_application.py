@@ -84,6 +84,7 @@ def build_application() -> Path:
         "--hidden-import", "PySide6.QtOpenGLWidgets",
         "--hidden-import", "PySide6.QtWebEngineWidgets",
         "--hidden-import", "PySide6.QtWebEngineCore",
+        "--collect-all", "PySide6.QtWebEngineWidgets",
         "--collect-all", "PySide6.QtWebEngineCore",
         "--collect-all", "pyopenjtalk",
         "--hidden-import", "OpenGL.GL",

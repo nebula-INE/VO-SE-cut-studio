@@ -83,7 +83,7 @@ def build_application() -> Path:
         "--hidden-import", "aural_engine",
         "--hidden-import", "PySide6.QtOpenGLWidgets",
         "--collect-all", "pyopenjtalk",
-        "--collect-all", "OpenGL",
+        "--hidden-import", "OpenGL.GL",
     ]
     add_binary(arguments, native_library, "native")
     # Homebrew FFmpeg uses dylib basenames that can collide with Qt's private
@@ -117,13 +117,18 @@ def build_application() -> Path:
     if not executable.is_file():
         raise RuntimeError(f"Packaged executable was not found: {executable}")
     if sys.platform == "darwin":
+        patch_env = os.environ.copy()
+        patch_env["AXRAL_FFMPEG_LIB_DIR"] = str(ffmpeg.resolve().parent.parent / "lib")
         subprocess.run(
             [
                 sys.executable,
                 str(ROOT / "scripts" / "fix_macos_ffmpeg_rpaths.py"),
                 str(app_dir),
+                "--ffmpeg-lib-dir",
+                patch_env["AXRAL_FFMPEG_LIB_DIR"],
             ],
             cwd=ROOT,
+            env=patch_env,
             check=True,
         )
     smoke = subprocess.run(

@@ -2,7 +2,11 @@ import math
 
 import pytest
 
-from character_motion import CharacterMotionError, sample_motion
+from character_motion import (
+    CharacterMotionError,
+    normalize_motion_keyframes,
+    sample_motion,
+)
 from motion_editor import (
     delete_motion_keyframe,
     insert_motion_keyframe,
@@ -91,3 +95,26 @@ def test_arm_roll_quaternion_round_trip(angle):
     quaternion = roll_quaternion(angle)
     assert sum(value * value for value in quaternion) == pytest.approx(1.0)
     assert quaternion_roll_deg(tuple(quaternion)) == pytest.approx(angle)
+
+
+def test_normalize_motion_keyframes_keeps_full_float_precision():
+    original_time = 0.123456789123
+    original_x = 0.0123456789123
+    frames = normalize_motion_keyframes([
+        {
+            "time": original_time,
+            "head": {"x": original_x},
+            "bones": {
+                "RightUpperArm": [
+                    0.123456789, 0.234567891, 0.345678912, 0.456789123
+                ]
+            },
+        }
+    ])
+
+    assert frames[0]["time"] == original_time
+    assert frames[0]["head"]["x"] == original_x
+    quaternion = frames[0]["bones"]["RightUpperArm"]
+    assert quaternion[0] == pytest.approx(0.123456789 / math.sqrt(
+        0.123456789**2 + 0.234567891**2 + 0.345678912**2 + 0.456789123**2
+    ))

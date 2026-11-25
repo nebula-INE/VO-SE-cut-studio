@@ -49,7 +49,7 @@ def test_vmc_blend_shapes_map_to_vrm_presets_and_clamp() -> None:
         "happy": 1.0,
         "sad": 0.5,
         "aa": 0.8,
-        "blink": 0.6,
+        "blinkLeft": 0.6,
     }
 
 

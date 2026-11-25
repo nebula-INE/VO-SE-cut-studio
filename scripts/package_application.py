@@ -150,6 +150,7 @@ def make_archive(app_dir: Path) -> None:
             "-srcfolder", str(staging), "-ov", "-format", "UDZO",
             str(RELEASE / f"{APP_NAME}-{VERSION}-macos.dmg"),
         ], check=True)
+        shutil.rmtree(staging)
     else:
         archive = RELEASE / f"{APP_NAME}-{VERSION}-linux-x64.tar.gz"
         with tarfile.open(archive, "w:gz") as output:

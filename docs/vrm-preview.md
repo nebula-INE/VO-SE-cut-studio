@@ -37,5 +37,8 @@ offline VRM frame rendering, and VRM MP4 export are not included yet; those
 will be integrated through a shared offscreen renderer in a later milestone.
 The existing built-in 2D renderer and its export path remain unchanged.
 
-WebEngine access to local file URLs is enabled only so the viewer can read a
-user-selected local VRM file. Remote page access is disabled.
+The viewer is served by a temporary HTTP server bound only to `127.0.0.1`.
+The selected VRM is exposed through a per-session random route. WebEngine local
+file access and remote page access are disabled, and a same-origin Content
+Security Policy prevents the viewer from loading resources from other origins.
+The temporary server is stopped when the application closes.

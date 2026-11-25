@@ -92,14 +92,14 @@ def retime_motion_keyframes(
     keyframes: list[dict[str, Any]],
     *,
     start_time: float,
-    speed_scale: float = 1.0,
+    duration_scale: float = 1.0,
 ) -> list[dict[str, Any]]:
     """Move and scale all keyframe times while preserving every pose value."""
     normalized = normalize_motion_keyframes(keyframes)
-    if isinstance(speed_scale, bool):
+    if isinstance(duration_scale, bool):
         raise CharacterMotionError("Motion speed scale must be a finite positive number")
     try:
-        scale = float(speed_scale)
+        scale = float(duration_scale)
     except (TypeError, ValueError) as exc:
         raise CharacterMotionError(
             "Motion speed scale must be a finite positive number"
@@ -240,12 +240,14 @@ if QDialog is not None:
 
             retime_group = QGroupBox("全体の時間調整")
             retime_form = QFormLayout(retime_group)
-            self.retime_start_spin = self._spin(0.0, 1_000_000.0, 8, 0.1)
+            self.retime_start_spin = self._spin(
+                0.0, max(1_000_000.0, float(self.keyframes[0]["time"])), 8, 0.1
+            )
             self.retime_start_spin.setValue(float(self.keyframes[0]["time"]))
-            self.retime_speed_spin = self._spin(0.01, 100.0, 4, 0.1)
-            self.retime_speed_spin.setValue(1.0)
+            self.retime_duration_spin = self._spin(0.01, 100.0, 4, 0.1)
+            self.retime_duration_spin.setValue(1.0)
             retime_form.addRow("開始時間 (秒)", self.retime_start_spin)
-            retime_form.addRow("速度倍率", self.retime_speed_spin)
+            retime_form.addRow("動作時間倍率", self.retime_duration_spin)
             self.retime_button = QPushButton("全キーフレームに適用")
             self.retime_button.clicked.connect(self._retime_all_keyframes)
             retime_form.addRow(self.retime_button)
@@ -438,7 +440,7 @@ if QDialog is not None:
                 self.keyframes = retime_motion_keyframes(
                     self.keyframes,
                     start_time=float(self.retime_start_spin.value()),
-                    speed_scale=float(self.retime_speed_spin.value()),
+                    duration_scale=float(self.retime_duration_spin.value()),
                 )
             except CharacterMotionError as exc:
                 QMessageBox.warning(self, "モーション時間を調整できません", str(exc))
@@ -447,7 +449,7 @@ if QDialog is not None:
             selected = min(self._current_index, len(self.keyframes) - 1)
             self._rebuild_selector(selected)
             self.retime_start_spin.setValue(float(self.keyframes[0]["time"]))
-            self.retime_speed_spin.setValue(1.0)
+            self.retime_duration_spin.setValue(1.0)
             self.retime_status.setText(
                 f"{len(self.keyframes)} 個のキーフレームの時間を更新しました。ポーズ値は変更していません。"
             )

@@ -253,7 +253,14 @@ class VRMViewerWidget(QWidget):
         self, bone_name: str, qx: float, qy: float, qz: float, qw: float
     ) -> None:
         """Compatibility entry point for rotation-only sources."""
-        self.set_bone_transform_3d(bone_name, 0.0, 0.0, 0.0, qx, qy, qz, qw)
+        normalized_name = vmc_bone_to_vrm(bone_name)
+        if normalized_name is None or normalized_name == "head":
+            return
+        try:
+            rotation = normalize_quaternion((qx, qy, qz, qw))
+        except (TypeError, ValueError, OverflowError):
+            return
+        self._bones[normalized_name] = {"rotation": rotation}
 
     def set_bone_transform_3d(
         self,

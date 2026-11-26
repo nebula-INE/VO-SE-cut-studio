@@ -2316,6 +2316,43 @@ class MainWindow(QMainWindow):
             return 5.0
         return 5.0
 
+    def _select_timeline_asset_track(self, tracks, clip_kind: str):
+        """Ask which matching unlocked track should receive a new asset clip."""
+        if not tracks:
+            return None
+        if len(tracks) == 1:
+            return tracks[0]
+
+        kind_labels = {
+            "video": "動画",
+            "audio": "音声",
+            "image": "画像",
+            "character": "キャラクター",
+            "motion": "モーション",
+            "other": "その他",
+        }
+        labels = [
+            (
+                f"{index + 1}. {track.name} "
+                f"({len(self.timeline_panel.model.clips_for_track(track.id))} 件)"
+            )
+            for index, track in enumerate(tracks)
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self,
+            "配置先トラック",
+            f"{kind_labels.get(clip_kind, clip_kind)}クリップの配置先:",
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return None
+        try:
+            return tracks[labels.index(selected)]
+        except ValueError:
+            return None
+
     def add_timeline_clip_from_assets(self) -> None:
         available = [
             asset for asset in self._project.assets
@@ -2350,17 +2387,9 @@ class MainWindow(QMainWindow):
             track for track in self.timeline_panel.model.tracks
             if track.kind == track_kind and not track.locked
         ]
-        if not tracks:
-            default_name = {
-                "video": "Video 1",
-                "audio": "Audio 1",
-                "overlay": "Overlay 1",
-                "other": "Other 1",
-            }.get(track_kind, f"{track_kind.title()} 1")
-            suffix = 1 + sum(
-                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
-            )
-            tracks = [self.timeline_panel.model.add_track(f"{default_name.split()[0]} {suffix}", track_kind)]
+        target_track = self._select_timeline_asset_track(tracks, clip_kind) if tracks else None
+        if tracks and target_track is None:
+            return
 
         default_duration = self._asset_default_duration(asset)
         duration, accepted = QInputDialog.getDouble(
@@ -2375,9 +2404,26 @@ class MainWindow(QMainWindow):
         if not accepted:
             return
 
+        # Create a fallback track only after the user confirms the clip duration.
+        # Cancelling either dialog must not leave an empty track in the project.
+        if target_track is None:
+            default_name = {
+                "video": "Video 1",
+                "audio": "Audio 1",
+                "overlay": "Overlay 1",
+                "motion": "Motion 1",
+                "other": "Other 1",
+            }[track_kind]
+            suffix = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
+            )
+            target_track = self.timeline_panel.model.add_track(
+                f"{default_name.split()[0]} {suffix}", track_kind
+            )
+
         try:
             self.timeline_panel.add_clip(
-                tracks[0].id,
+                target_track.id,
                 clip_kind,
                 asset.name,
                 duration,

@@ -60,6 +60,9 @@ lanes. A single character keeps the original lower-left placement.
 
 For independent motion, place each character on its own visible Overlay/Other
 track and create corresponding visible Motion tracks in the same order. When
+multiple unlocked tracks of the matching type exist, importing an asset asks
+which track should receive it and displays each track's current clip count. This
+lets you direct each character and motion recording to its intended lane. When
 there are multiple character tracks and multiple Motion tracks, the first
 character track uses the first Motion track, the second uses the second, and so
 on. A single visible Motion track remains shared across character tracks for

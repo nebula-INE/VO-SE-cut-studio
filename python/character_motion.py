@@ -1,4 +1,4 @@
-"""Validated keyframe data for offline 2D character animation export.
+"""Validated keyframe data for offline 2D and VRM character animation.
 
 Motion files are simple UTF-8 JSON documents so recordings can be created by
 mocap tools, scripts, or hand-authored without a Qt dependency.

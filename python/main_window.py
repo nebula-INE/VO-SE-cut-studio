@@ -1293,7 +1293,7 @@ class MainWindow(QMainWindow):
                     if asset is not None:
                         try:
                             path = self._project.resolve_asset(asset)
-                        except (OSError, ProjectError):
+                        except (OSError, ProjectError, ValueError):
                             continue
                         if path.suffix.lower() == ".vrm" and path.is_file():
                             active_characters.append((track_index, clip, path))
@@ -1368,7 +1368,7 @@ class MainWindow(QMainWindow):
             source_time = motion_clip.source_in + seconds - motion_clip.start
             sampled = sample_motion(frames, source_time)
             pose = motion_state_to_vrm_state(sampled)
-        except (OSError, ProjectError, ValueError) as exc:
+        except (OSError, ProjectError, ValueError, KeyError, TypeError) as exc:
             error_signature = f"{motion_clip.id}:{exc}"
             if self._last_vrm_motion_error != error_signature:
                 self.statusBar().showMessage(

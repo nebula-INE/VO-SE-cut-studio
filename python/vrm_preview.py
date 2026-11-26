@@ -404,7 +404,7 @@ class VRMViewerWidget(QWidget):
         if request["error"] is not None:
             raise RuntimeError(str(request["error"]))
         result = request["result"]
-        if not isinstance(result, bytes) or not result.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):
+        if not isinstance(result, bytes) or not result.startswith(b"\x89PNG\r\n\x1a\n"):
             raise RuntimeError("VRM frame renderer returned an invalid PNG image")
         return result
 

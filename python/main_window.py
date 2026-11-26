@@ -58,6 +58,7 @@ from timeline_video_render import (
     render_timeline_video,
     timeline_motion_clips,
     timeline_video_clips,
+    motion_clips_for_character,
 )
 from character_motion import (
     CharacterMotionError,
@@ -1359,6 +1360,9 @@ class MainWindow(QMainWindow):
                 self.preview_3d_widget.load_model(str(character_path))
                 if self.preview_3d_dock is not None:
                     self.preview_3d_dock.show()
+                self._update_vrm_timeline_pose(
+                    self.timeline_panel.playhead_seconds
+                )
             except (OSError, ProjectError) as exc:
                 QMessageBox.warning(self, "VRMモデルを開けません", str(exc))
             return
@@ -1856,7 +1860,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"ボーンデータを無視しました: {exc}", 5000)
 
     def _update_vrm_timeline_pose(self, timeline_seconds: float) -> None:
-        """Sample an active motion clip and apply it to the currently active VRM."""
+        """Preview the selected active VRM character and its paired motion track."""
         if not _VRM_VIEWER_AVAILABLE or self.preview_3d_dock is None:
             return
         try:
@@ -1877,19 +1881,33 @@ class MainWindow(QMainWindow):
                 if path.suffix.lower() == ".vrm" and path.is_file():
                     active_characters.append((clip, path))
 
-            if len(active_characters) > 1:
-                self.preview_3d_widget.set_timeline_state(None)
-                self.statusBar().showMessage(
-                    "同じ時間帯に複数のVRMキャラクターがあります。1体ずつ配置してください。",
-                    5000,
-                )
-                return
             if active_characters:
-                _clip, character_path = active_characters[0]
+                track_order = {
+                    track.id: index
+                    for index, track in enumerate(model.tracks)
+                }
+                active_characters.sort(
+                    key=lambda item: (
+                        track_order.get(item[0].track_id, len(track_order)),
+                        item[0].start,
+                        item[0].id,
+                    )
+                )
+                selected_clip_id = self.timeline_panel.selected_clip_id
+                selected_character = next(
+                    (
+                        item for item in active_characters
+                        if item[0].id == selected_clip_id
+                    ),
+                    active_characters[0],
+                )
+                character_clip, character_path = selected_character
                 if self.preview_3d_widget.model_path != character_path.resolve():
                     self.preview_3d_widget.load_model(character_path)
                 if not self.preview_3d_dock.isVisible():
                     self.preview_3d_dock.show()
+            else:
+                character_clip = None
 
             active_motion = []
             for clip in model.clips:
@@ -1902,14 +1920,20 @@ class MainWindow(QMainWindow):
                     continue
                 active_motion.append(clip)
 
+            if character_clip is not None:
+                active_motion = motion_clips_for_character(
+                    model, character_clip, active_motion
+                )
+
             if not active_motion:
                 self.preview_3d_widget.set_timeline_state(None)
                 return
             if len(active_motion) > 1:
                 self.preview_3d_widget.set_timeline_state(None)
                 self.statusBar().showMessage(
-                    "VRM再生中のモーションクリップが重なっています。",
-                    5000,
+                    "選択キャラクターに対応するモーションクリップが重なっています。"
+                    "同じMotionトラック上で時間を分けてください。",
+                    6000,
                 )
                 return
 

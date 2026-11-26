@@ -693,3 +693,49 @@ def test_character_stage_transform_controls_position_scale_and_rotation(
     assert "rotate=30*PI/180:ow=rotw(iw):oh=roth(ih):c=none" in graph
     assert "overlay=x=(W-w)*0.25:y=(H-h)*0.6" in graph
     assert output.read_bytes() == b"positioned mp4"
+
+
+def test_motion_clips_for_character_uses_matching_track_when_multiple_tracks_exist():
+    from timeline_video_render import motion_clips_for_character
+
+    model = TimelineModel.create_default()
+    character_track_a = next(track for track in model.tracks if track.kind == "overlay")
+    motion_track_a = next(track for track in model.tracks if track.kind == "motion")
+    character_track_b = model.add_track("Overlay 2", "overlay")
+    motion_track_b = model.add_track("Motion 2", "motion")
+    character_a = model.add_clip(
+        character_track_a.id, "character", "actor A", 5.0, asset_id="actor-a.vrm"
+    )
+    character_b = model.add_clip(
+        character_track_b.id, "character", "actor B", 5.0, asset_id="actor-b.vrm"
+    )
+    motion_a = model.add_clip(
+        motion_track_a.id, "motion", "take A", 5.0, asset_id="motion-a"
+    )
+    motion_b = model.add_clip(
+        motion_track_b.id, "motion", "take B", 5.0, asset_id="motion-b"
+    )
+
+    assert motion_clips_for_character(model, character_a, [motion_a, motion_b]) == [motion_a]
+    assert motion_clips_for_character(model, character_b, [motion_a, motion_b]) == [motion_b]
+
+
+def test_motion_clips_for_character_keeps_single_motion_track_shared():
+    from timeline_video_render import motion_clips_for_character
+
+    model = TimelineModel.create_default()
+    character_track_a = next(track for track in model.tracks if track.kind == "overlay")
+    character_track_b = model.add_track("Overlay 2", "overlay")
+    motion_track = next(track for track in model.tracks if track.kind == "motion")
+    character_a = model.add_clip(
+        character_track_a.id, "character", "actor A", 5.0, asset_id="actor-a.vrm"
+    )
+    character_b = model.add_clip(
+        character_track_b.id, "character", "actor B", 5.0, asset_id="actor-b.vrm"
+    )
+    shared_motion = model.add_clip(
+        motion_track.id, "motion", "shared take", 5.0, asset_id="shared-motion"
+    )
+
+    assert motion_clips_for_character(model, character_a, [shared_motion]) == [shared_motion]
+    assert motion_clips_for_character(model, character_b, [shared_motion]) == [shared_motion]

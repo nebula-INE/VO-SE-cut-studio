@@ -69,6 +69,8 @@ on. A single visible Motion track remains shared across character tracks for
 backward compatibility. Overlapping motion clips on the same paired track are
 rejected as ambiguous instead of silently mixing two poses.
 
+When several VRM character clips overlap, the 3D preview shows the selected active character. Click another active character clip in the timeline to switch the preview; its paired Motion track is applied. When no active character clip is selected, the first visible actor in track order is previewed. The preview viewport currently displays one actor at a time, while MP4 export composites all visible overlapping characters.
+
 Select a character clip to edit its stage transform in the timeline controls.
 **自動配置** keeps the existing lower-left/smart multi-character placement.
 Disable it to set X/Y placement as percentages of the free stage area. Size is

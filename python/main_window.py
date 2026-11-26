@@ -39,6 +39,7 @@ from runtime_paths import find_runtime_file
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
+from timeline_track_selection import select_timeline_asset_track
 from timeline_model import TimelineError, TimelineModel
 from timeline_audio import TimelineAudioPlayback
 from timeline_audio_render import (
@@ -2316,6 +2317,14 @@ class MainWindow(QMainWindow):
             return 5.0
         return 5.0
 
+    def _select_timeline_asset_track(self, tracks, clip_kind: str):
+        return select_timeline_asset_track(
+            self,
+            self.timeline_panel.model,
+            tracks,
+            clip_kind,
+        )
+
     def add_timeline_clip_from_assets(self) -> None:
         available = [
             asset for asset in self._project.assets
@@ -2350,17 +2359,9 @@ class MainWindow(QMainWindow):
             track for track in self.timeline_panel.model.tracks
             if track.kind == track_kind and not track.locked
         ]
-        if not tracks:
-            default_name = {
-                "video": "Video 1",
-                "audio": "Audio 1",
-                "overlay": "Overlay 1",
-                "other": "Other 1",
-            }.get(track_kind, f"{track_kind.title()} 1")
-            suffix = 1 + sum(
-                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
-            )
-            tracks = [self.timeline_panel.model.add_track(f"{default_name.split()[0]} {suffix}", track_kind)]
+        target_track = self._select_timeline_asset_track(tracks, clip_kind) if tracks else None
+        if tracks and target_track is None:
+            return
 
         default_duration = self._asset_default_duration(asset)
         duration, accepted = QInputDialog.getDouble(
@@ -2375,9 +2376,26 @@ class MainWindow(QMainWindow):
         if not accepted:
             return
 
+        # Create a fallback track only after the user confirms the clip duration.
+        # Cancelling either dialog must not leave an empty track in the project.
+        if target_track is None:
+            default_name = {
+                "video": "Video 1",
+                "audio": "Audio 1",
+                "overlay": "Overlay 1",
+                "motion": "Motion 1",
+                "other": "Other 1",
+            }[track_kind]
+            suffix = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
+            )
+            target_track = self.timeline_panel.model.add_track(
+                f"{default_name.split()[0]} {suffix}", track_kind
+            )
+
         try:
             self.timeline_panel.add_clip(
-                tracks[0].id,
+                target_track.id,
                 clip_kind,
                 asset.name,
                 duration,

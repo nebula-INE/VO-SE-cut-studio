@@ -94,3 +94,12 @@ def test_motion_state_to_vrm_pose_prefers_v2_humanoid_keyframes() -> None:
     })
     assert pose["bones"]["head"]["position"] == (0.0, 1.0, 0.0)
     assert pose["bones"]["hips"]["position"] == (0.2, 0.0, 0.0)
+
+
+
+def test_canonical_vrm_blink_presets_survive_motion_normalization() -> None:
+    result = normalize_blend_shapes({
+        "blinkLeft": 0.7,
+        "blinkRight": 0.4,
+    })
+    assert result == {"blinkLeft": 0.7, "blinkRight": 0.4}

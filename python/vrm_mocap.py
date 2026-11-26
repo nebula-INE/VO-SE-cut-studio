@@ -105,6 +105,61 @@ def normalize_quaternion(values: Sequence[float]) -> tuple[float, float, float, 
     return tuple(value / norm for value in components)  # type: ignore[return-value]
 
 
+def motion_state_to_vrm_pose(state: Mapping) -> dict:
+    """Convert sampled aural-motion v1/v2 data into the VRM viewer payload."""
+    if not isinstance(state, Mapping):
+        raise ValueError("motion state must be an object")
+
+    bones: dict[str, dict] = {}
+    normalized_vrm_bones = set(_VMC_BONE_MAP.values())
+    vrm_state = state.get("vrm", {})
+    if not isinstance(vrm_state, Mapping):
+        vrm_state = {}
+    head = vrm_state.get("head", {})
+    if isinstance(head, Mapping) and head:
+        bones["head"] = dict(head)
+    vrm_bones = vrm_state.get("bones", {})
+    if isinstance(vrm_bones, Mapping):
+        for name, transform in vrm_bones.items():
+            if name in normalized_vrm_bones and isinstance(transform, Mapping):
+                bones[name] = dict(transform)
+
+    # Legacy v1 motion stores 2D head offsets/tilt and four arm rotations.
+    if "head" not in bones:
+        head_2d = state.get("head", {})
+        if isinstance(head_2d, Mapping):
+            angle = math.radians(float(head_2d.get("tilt_deg", 0.0))) * 0.5
+            bones["head"] = {
+                "position": (
+                    float(head_2d.get("x", 0.0)),
+                    float(head_2d.get("y", 0.0)),
+                    0.0,
+                ),
+                "rotation": (0.0, 0.0, math.sin(angle), math.cos(angle)),
+            }
+    legacy_bones = state.get("bones", {})
+    if isinstance(legacy_bones, Mapping):
+        for name, rotation in legacy_bones.items():
+            normalized_name = vmc_bone_to_vrm(name)
+            if normalized_name is not None and isinstance(rotation, (tuple, list)):
+                bones.setdefault(normalized_name, {"rotation": rotation})
+
+    weights = {}
+    for field in ("blend_shapes", "vowels"):
+        values = state.get(field, {})
+        if not isinstance(values, Mapping):
+            continue
+        for name, weight in values.items():
+            try:
+                weights[name] = max(float(weights.get(name, 0.0)), float(weight))
+            except (TypeError, ValueError, OverflowError):
+                continue
+    return {
+        "bones": bones,
+        "expressions": normalize_blend_shapes(weights),
+    }
+
+
 def normalize_blend_shapes(values: Mapping[str, float]) -> dict[str, float]:
     """Map VMC/VRM0 aliases to VRM expression presets and clamp to [0, 1]."""
     normalized: dict[str, float] = {}

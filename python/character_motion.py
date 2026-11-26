@@ -17,7 +17,8 @@ from vrm_mocap import SUPPORTED_VRM_BONES
 MOTION_FORMAT = "aural-motion"
 MOTION_VERSION = 1
 MOTION_VERSION_VRM = 2
-MAX_MOTION_FILE_BYTES = 64 * 1024 * 1024
+MAX_MOTION_FILE_BYTES = 10 * 1024 * 1024
+MAX_VRM_MOTION_FILE_BYTES = 64 * 1024 * 1024
 SUPPORTED_BONES = frozenset({
     "LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm",
 })
@@ -157,9 +158,9 @@ def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path).expanduser()
     try:
         size = source.stat().st_size
-        if size > MAX_MOTION_FILE_BYTES:
+        if size > MAX_VRM_MOTION_FILE_BYTES:
             raise CharacterMotionError(
-                f"Motion file is too large ({size} bytes; limit {MAX_MOTION_FILE_BYTES})"
+                f"Motion file is too large ({size} bytes; limit {MAX_VRM_MOTION_FILE_BYTES})"
             )
         payload = json.loads(source.read_text(encoding="utf-8"))
     except CharacterMotionError:
@@ -172,6 +173,14 @@ def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
     version = payload.get("version")
     if type(version) is not int or version not in (MOTION_VERSION, MOTION_VERSION_VRM):
         raise CharacterMotionError(f"Unsupported motion format version: {version!r}")
+    size_limit = (
+        MAX_VRM_MOTION_FILE_BYTES
+        if version == MOTION_VERSION_VRM else MAX_MOTION_FILE_BYTES
+    )
+    if size > size_limit:
+        raise CharacterMotionError(
+            f"Motion file is too large ({size} bytes; limit {size_limit})"
+        )
     frames = payload.get("keyframes")
     if not isinstance(frames, list) or not frames:
         raise CharacterMotionError("Motion file must contain at least one keyframe")
@@ -358,9 +367,13 @@ def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
     encoded = (
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     ).encode("utf-8")
-    if len(encoded) > MAX_MOTION_FILE_BYTES:
+    size_limit = (
+        MAX_VRM_MOTION_FILE_BYTES
+        if version == MOTION_VERSION_VRM else MAX_MOTION_FILE_BYTES
+    )
+    if len(encoded) > size_limit:
         raise CharacterMotionError(
-            f"Motion file is too large ({len(encoded)} bytes; limit {MAX_MOTION_FILE_BYTES})"
+            f"Motion file is too large ({len(encoded)} bytes; limit {size_limit})"
         )
 
     temporary_name: str | None = None

@@ -203,3 +203,36 @@ def test_motion_v1_rejects_vrm_fields_and_v2_rejects_unknown_bones(tmp_path):
     with pytest.raises(CharacterMotionError, match="Unsupported VRM bone"):
         load_motion_file(path)
 
+def test_vrm_v2_rejects_malformed_positions_and_quaternions(tmp_path):
+    payloads = [
+        {
+            "head_3d": {
+                "position": [0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+            }
+        },
+        {
+            "head_3d": {
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 0.0],
+            }
+        },
+        {
+            "vrm_bones": {
+                "Hips": {
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, float("nan"), 1.0],
+                }
+            }
+        },
+    ]
+    for index, fields in enumerate(payloads):
+        path = tmp_path / f"bad-vrm-{index}.motion.json"
+        path.write_text(json.dumps({
+            "format": "aural-motion",
+            "version": 2,
+            "keyframes": [{"time": 0.0, **fields}],
+        }), encoding="utf-8")
+        with pytest.raises(CharacterMotionError):
+            load_motion_file(path)
+

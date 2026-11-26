@@ -109,7 +109,6 @@ jobs:
             libpulse0 \
             libnss3 \
             libnspr4 \
-            libasound2 \
             libcups2 \
             libgtk-3-0 \
             libatk1.0-0 \
@@ -130,6 +129,11 @@ jobs:
             libxkbfile1 \
             libxtst6 \
             libxshmfence1
+          if apt-cache show libasound2t64 >/dev/null 2>&1; then
+            sudo apt-get install -y libasound2t64
+          else
+            sudo apt-get install -y libasound2
+          fi
 
       - name: Configure CMake
         run: cmake -B build

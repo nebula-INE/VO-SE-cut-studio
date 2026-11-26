@@ -64,7 +64,10 @@ from character_motion import (
     sample_motion,
     save_motion_file,
 )
-from vrm_mocap import motion_state_to_vrm_pose
+from vrm_mocap import (
+    motion_state_to_vrm_pose,
+    should_add_character_clip_for_recording,
+)
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
     MAX_RECORDING_SECONDS,
@@ -2028,8 +2031,13 @@ class MainWindow(QMainWindow):
             )
             # A pre-existing 2D character clip must not suppress the VRM clip:
             # otherwise a saved VRM take has no model reference when reopened.
-            needs_vrm_character = active_vrm_model and not overlapping_vrm_characters
-            needs_2d_character = not active_vrm_model and not overlapping_characters
+            should_add_character = should_add_character_clip_for_recording(
+                has_any_character_clip=bool(overlapping_characters),
+                has_vrm_character_clip=bool(overlapping_vrm_characters),
+                has_loaded_vrm_model=active_vrm_model,
+            )
+            needs_vrm_character = should_add_character and active_vrm_model
+            needs_2d_character = should_add_character and not active_vrm_model
 
             if needs_vrm_character or needs_2d_character:
                 overlay_tracks = [

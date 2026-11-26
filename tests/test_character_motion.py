@@ -148,3 +148,23 @@ def test_v1_motion_without_vrm_remains_loadable(tmp_path):
         {"time": 0.0, "head": {"x": 0.0, "y": 0.0, "tilt_deg": 0.0}},
     ], version=1)
     assert load_motion_file(path)[0]["time"] == 0.0
+
+
+
+def test_first_vrm_pose_interpolates_from_neutral_transform(tmp_path):
+    path = _write_motion(tmp_path / "first-pose.motion.json", [
+        {"time": 0.0},
+        {
+            "time": 1.0,
+            "vrm": {
+                "head": {
+                    "position": [1.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)],
+                }
+            },
+        },
+    ])
+
+    state = sample_motion(load_motion_file(path), 0.5)
+    assert state["vrm"]["head"]["position"] == pytest.approx((0.5, 0.0, 0.0))
+    assert state["vrm"]["head"]["rotation"][2] == pytest.approx(math.sin(math.pi / 8))

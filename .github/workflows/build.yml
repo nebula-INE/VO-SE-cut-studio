@@ -2,7 +2,7 @@ name: Build aural-engine
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, feat/vrm-character-preview-v1 ]
   pull_request:
     branches: [ main, feat/vrm-timeline-mp4-export-v1 ]
 

@@ -4,7 +4,12 @@ import math
 
 import pytest
 
-from vrm_mocap import normalize_blend_shapes, normalize_quaternion, vmc_bone_to_vrm
+from vrm_mocap import (
+    motion_state_to_vrm_pose,
+    normalize_blend_shapes,
+    normalize_quaternion,
+    vmc_bone_to_vrm,
+)
 
 
 @pytest.mark.parametrize(
@@ -59,3 +64,33 @@ def test_vmc_blend_shapes_map_to_vrm_presets_and_clamp() -> None:
 def test_expression_values_ignore_nan_and_keep_max_alias_weight() -> None:
     result = normalize_blend_shapes({"Joy": 0.4, "happy": 0.8, "Angry": math.nan})
     assert result == {"happy": 0.8}
+
+
+
+def test_motion_state_to_vrm_pose_converts_legacy_v1_keyframes() -> None:
+    pose = motion_state_to_vrm_pose({
+        "head": {"x": 0.1, "y": -0.2, "tilt_deg": 30.0},
+        "bones": {"LeftUpperArm": (0.0, 0.0, 0.5, 0.8660254)},
+        "blend_shapes": {"Joy": 0.8},
+        "vowels": {"A": 0.6},
+    })
+    assert pose["bones"]["head"]["position"] == (0.1, -0.2, 0.0)
+    assert pose["bones"]["head"]["rotation"][2] == pytest.approx(0.258819)
+    assert pose["bones"]["leftUpperArm"]["rotation"][2] == pytest.approx(0.5)
+    assert pose["expressions"]["happy"] == pytest.approx(0.8)
+    assert pose["expressions"]["aa"] == pytest.approx(0.6)
+
+
+def test_motion_state_to_vrm_pose_prefers_v2_humanoid_keyframes() -> None:
+    pose = motion_state_to_vrm_pose({
+        "vrm": {
+            "head": {"position": (0.0, 1.0, 0.0), "rotation": (0.0, 0.0, 0.0, 1.0)},
+            "bones": {"hips": {"position": (0.2, 0.0, 0.0), "rotation": (0.0, 0.0, 0.0, 1.0)}},
+        },
+        "head": {"x": 9.0, "y": 9.0, "tilt_deg": 90.0},
+        "bones": {},
+        "blend_shapes": {},
+        "vowels": {},
+    })
+    assert pose["bones"]["head"]["position"] == (0.0, 1.0, 0.0)
+    assert pose["bones"]["hips"]["position"] == (0.2, 0.0, 0.0)

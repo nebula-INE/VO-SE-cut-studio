@@ -7,6 +7,7 @@ from typing import Callable
 
 from character_motion import SUPPORTED_BONES
 from expression import normalize_blend_shapes
+from vrm_mocap import normalize_quaternion, vmc_bone_to_vrm
 
 FRAME_RATE = 30.0
 MAX_RECORDING_SECONDS = 300.0
@@ -50,6 +51,8 @@ class MotionCaptureRecorder:
         self._shapes: dict[str, float] = {}
         self._vowels: dict[str, float] = {}
         self._bones: dict[str, tuple[float, float, float, float]] = {}
+        self._vrm_head: dict | None = None
+        self._vrm_bones: dict[str, dict] = {}
         self._frames: list[dict] = []
 
     @property
@@ -67,6 +70,8 @@ class MotionCaptureRecorder:
         self._last_capture = 0.0
         self._head = {"x": 0.0, "y": 0.0, "tilt_deg": 0.0}
         self._shapes, self._vowels, self._bones, self._frames = {}, {}, {}, []
+        self._vrm_head = None
+        self._vrm_bones = {}
         self._recording = True
         self._frames.append(self._snapshot(0.0))
 
@@ -103,14 +108,74 @@ class MotionCaptureRecorder:
             return
         self._bones[name] = tuple(value / norm for value in values)
 
+    def update_head_3d(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
+        if not self._recording:
+            return
+        position = tuple(_finite(value, "VRM head position") for value in (x, y, z))
+        rotation = normalize_quaternion((qx, qy, qz, qw))
+        self._vrm_head = {
+            "position": position,
+            "rotation": rotation,
+        }
+
+    def update_bone_3d(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
+        if not self._recording:
+            return
+        normalized_name = vmc_bone_to_vrm(name)
+        if normalized_name is None:
+            return
+        rotation = normalize_quaternion((qx, qy, qz, qw))
+        transform = {"rotation": rotation}
+        if normalized_name == "hips":
+            transform["position"] = tuple(
+                _finite(value, f"{name} position") for value in (x, y, z)
+            )
+        self._vrm_bones[normalized_name] = transform
+
     def _snapshot(self, elapsed: float) -> dict:
-        return {
+        frame = {
             "time": round(max(0.0, elapsed), 6),
             "head": dict(self._head),
             "blend_shapes": dict(self._shapes),
             "vowels": dict(self._vowels),
             "bones": {key: list(value) for key, value in sorted(self._bones.items())},
         }
+        vrm: dict = {}
+        if self._vrm_head is not None:
+            vrm["head"] = {
+                "position": list(self._vrm_head["position"]),
+                "rotation": list(self._vrm_head["rotation"]),
+            }
+        if self._vrm_bones:
+            vrm["bones"] = {
+                key: {
+                    name: list(value) if isinstance(value, tuple) else value
+                    for name, value in transform.items()
+                }
+                for key, transform in sorted(self._vrm_bones.items())
+            }
+        if vrm:
+            frame["vrm"] = vrm
+        return frame
 
     def capture(self, *, now: float | None = None, force: bool = False) -> bool:
         if not self._recording:
@@ -141,6 +206,7 @@ class MotionCaptureRecorder:
             tuple(sorted(frame["blend_shapes"].items())),
             tuple(sorted(frame["vowels"].items())),
             tuple((key, tuple(value)) for key, value in sorted(frame["bones"].items())),
+            repr(frame.get("vrm", {})),
         )
 
     def stop(self, *, now: float | None = None) -> list[dict]:
@@ -162,6 +228,19 @@ class MotionCaptureRecorder:
                     "blend_shapes": dict(frame["blend_shapes"]),
                     "vowels": dict(frame["vowels"]),
                     "bones": {key: list(value) for key, value in frame["bones"].items()},
+                    **({"vrm": {
+                        "head": {
+                            key: list(value) if isinstance(value, tuple) else value
+                            for key, value in frame["vrm"]["head"].items()
+                        } if "head" in frame["vrm"] else {},
+                        "bones": {
+                            bone: {
+                                key: list(value) if isinstance(value, tuple) else value
+                                for key, value in transform.items()
+                            }
+                            for bone, transform in frame["vrm"].get("bones", {}).items()
+                        },
+                    }} if "vrm" in frame else {}),
                 }
                 for frame in self._frames
             ]
@@ -174,3 +253,5 @@ class MotionCaptureRecorder:
         self._shapes.clear()
         self._vowels.clear()
         self._bones.clear()
+        self._vrm_head = None
+        self._vrm_bones.clear()

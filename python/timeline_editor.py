@@ -4,6 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QSize, QRectF, Signal, QSignalBlocker
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -347,6 +348,38 @@ class TimelineEditorWidget(QWidget):
         self.fade_out_spinbox.setSingleStep(0.05)
         self.fade_out_spinbox.setSuffix(" s")
         self.fade_out_spinbox.setFixedWidth(82)
+
+        self.auto_character_position_checkbox = QCheckBox("自動配置")
+        self.position_x_spinbox = QDoubleSpinBox()
+        self.position_x_spinbox.setRange(0.0, 100.0)
+        self.position_x_spinbox.setDecimals(1)
+        self.position_x_spinbox.setSuffix("%")
+        self.position_x_spinbox.setFixedWidth(76)
+        self.position_y_spinbox = QDoubleSpinBox()
+        self.position_y_spinbox.setRange(0.0, 100.0)
+        self.position_y_spinbox.setDecimals(1)
+        self.position_y_spinbox.setSuffix("%")
+        self.position_y_spinbox.setFixedWidth(76)
+        self.character_scale_spinbox = QDoubleSpinBox()
+        self.character_scale_spinbox.setRange(10.0, 250.0)
+        self.character_scale_spinbox.setDecimals(0)
+        self.character_scale_spinbox.setSingleStep(5.0)
+        self.character_scale_spinbox.setSuffix("%")
+        self.character_scale_spinbox.setFixedWidth(76)
+        self.character_rotation_spinbox = QDoubleSpinBox()
+        self.character_rotation_spinbox.setRange(-180.0, 180.0)
+        self.character_rotation_spinbox.setDecimals(1)
+        self.character_rotation_spinbox.setSuffix("°")
+        self.character_rotation_spinbox.setFixedWidth(76)
+        self.auto_character_position_checkbox.setChecked(True)
+        for control in (
+            self.auto_character_position_checkbox,
+            self.position_x_spinbox,
+            self.position_y_spinbox,
+            self.character_scale_spinbox,
+            self.character_rotation_spinbox,
+        ):
+            control.setEnabled(False)
         for control in (self.volume_spinbox, self.fade_in_spinbox, self.fade_out_spinbox):
             control.setEnabled(False)
             control.setKeyboardTracking(False)
@@ -388,7 +421,21 @@ class TimelineEditorWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addLayout(toolbar)
+        character_controls = QHBoxLayout()
+        character_controls.addWidget(QLabel("選択キャラクター"))
+        character_controls.addWidget(self.auto_character_position_checkbox)
+        character_controls.addWidget(QLabel("X"))
+        character_controls.addWidget(self.position_x_spinbox)
+        character_controls.addWidget(QLabel("Y"))
+        character_controls.addWidget(self.position_y_spinbox)
+        character_controls.addWidget(QLabel("サイズ"))
+        character_controls.addWidget(self.character_scale_spinbox)
+        character_controls.addWidget(QLabel("回転"))
+        character_controls.addWidget(self.character_rotation_spinbox)
+        character_controls.addStretch(1)
+
         layout.addLayout(audio_controls)
+        layout.addLayout(character_controls)
         layout.addWidget(self.scroll, stretch=1)
 
         self.canvas.changed.connect(self._on_canvas_changed)
@@ -405,6 +452,11 @@ class TimelineEditorWidget(QWidget):
         self.volume_spinbox.valueChanged.connect(self._apply_audio_controls)
         self.fade_in_spinbox.valueChanged.connect(self._apply_audio_controls)
         self.fade_out_spinbox.valueChanged.connect(self._apply_audio_controls)
+        self.auto_character_position_checkbox.toggled.connect(self._apply_character_controls)
+        self.position_x_spinbox.valueChanged.connect(self._apply_character_controls)
+        self.position_y_spinbox.valueChanged.connect(self._apply_character_controls)
+        self.character_scale_spinbox.valueChanged.connect(self._apply_character_controls)
+        self.character_rotation_spinbox.valueChanged.connect(self._apply_character_controls)
 
     @property
     def selected_clip_id(self) -> str | None:
@@ -424,6 +476,7 @@ class TimelineEditorWidget(QWidget):
             self.split_button.setEnabled(False)
             self.delete_button.setEnabled(False)
             self._sync_audio_controls(None, False)
+            self._sync_character_controls(None, False)
             return
         track = self.model.get_track(clip.track_id)
         locked = track is None or track.locked
@@ -435,6 +488,9 @@ class TimelineEditorWidget(QWidget):
             clip,
             not locked and track is not None and track.kind == "audio"
             and clip.kind in {"audio", "voice"},
+        )
+        self._sync_character_controls(
+            clip, not locked and clip.kind == "character"
         )
 
     def _sync_audio_controls(self, clip: TimelineClip | None, enabled: bool) -> None:
@@ -455,6 +511,62 @@ class TimelineEditorWidget(QWidget):
             self.fade_in_spinbox.setValue(clip.fade_in)
             self.fade_out_spinbox.setValue(clip.fade_out)
         del blockers
+
+    def _sync_character_controls(
+        self, clip: TimelineClip | None, enabled: bool
+    ) -> None:
+        controls = (
+            self.auto_character_position_checkbox,
+            self.position_x_spinbox,
+            self.position_y_spinbox,
+            self.character_scale_spinbox,
+            self.character_rotation_spinbox,
+        )
+        blockers = [QSignalBlocker(control) for control in controls]
+        for control in controls:
+            control.setEnabled(enabled)
+        if clip is None:
+            self.auto_character_position_checkbox.setChecked(True)
+            self.position_x_spinbox.setValue(50.0)
+            self.position_y_spinbox.setValue(50.0)
+            self.character_scale_spinbox.setValue(100.0)
+            self.character_rotation_spinbox.setValue(0.0)
+        else:
+            automatic = clip.position_x is None
+            self.auto_character_position_checkbox.setChecked(automatic)
+            self.position_x_spinbox.setValue(
+                50.0 if automatic else float(clip.position_x) * 100.0
+            )
+            self.position_y_spinbox.setValue(
+                50.0 if automatic else float(clip.position_y) * 100.0
+            )
+            self.character_scale_spinbox.setValue(clip.scale * 100.0)
+            self.character_rotation_spinbox.setValue(clip.rotation_deg)
+        self.position_x_spinbox.setEnabled(enabled and not self.auto_character_position_checkbox.isChecked())
+        self.position_y_spinbox.setEnabled(enabled and not self.auto_character_position_checkbox.isChecked())
+        del blockers
+
+    def _apply_character_controls(self, _value=None) -> None:
+        clip = self.model.get_clip(self.selected_clip_id or "")
+        if clip is None or clip.kind != "character" or not self.character_scale_spinbox.isEnabled():
+            return
+        automatic = self.auto_character_position_checkbox.isChecked()
+        try:
+            self.model.set_character_transform(
+                clip.id,
+                position_x=None if automatic else self.position_x_spinbox.value() / 100.0,
+                position_y=None if automatic else self.position_y_spinbox.value() / 100.0,
+                scale=self.character_scale_spinbox.value() / 100.0,
+                rotation_deg=self.character_rotation_spinbox.value(),
+            )
+        except TimelineError as exc:
+            self.status_label.setText(str(exc))
+            self._on_selection_changed(clip.id)
+            return
+        self.position_x_spinbox.setEnabled(not automatic)
+        self.position_y_spinbox.setEnabled(not automatic)
+        self.canvas.update()
+        self.changed.emit()
 
     def _apply_audio_controls(self, _value: float = 0.0) -> None:
         clip = self.model.get_clip(self.selected_clip_id or "")

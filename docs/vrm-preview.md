@@ -50,9 +50,32 @@ clip, the recorder registers that model as an external project asset and
 creates the matching VRM character clip automatically. Existing 2D recording
 continues to create the built-in 2D character clip.
 
-Offline VRM frame rendering and VRM MP4 export are not included yet; those
-require a shared offscreen renderer and their own cross-platform tests. The
-existing built-in 2D renderer and its export path remain unchanged.
+## Multiple characters and MP4 export
+
+Each visible character clip is rendered to its own transparent PNG sequence and
+composited by the existing FFmpeg video path. Multiple VRM clips may overlap in
+time. Overlapping characters are automatically arranged in horizontal stage
+lanes in timeline track order; clips in separate time ranges reuse the available
+lanes. A single character keeps the original lower-left placement.
+
+For independent motion, place each character on its own visible Overlay/Other
+track and create corresponding visible Motion tracks in the same order. When
+there are multiple character tracks and multiple Motion tracks, the first
+character track uses the first Motion track, the second uses the second, and so
+on. A single visible Motion track remains shared across character tracks for
+backward compatibility. Overlapping motion clips on the same paired track are
+rejected as ambiguous instead of silently mixing two poses.
+
+Select a character clip to edit its stage transform in the timeline controls.
+**自動配置** keeps the existing lower-left/smart multi-character placement.
+Disable it to set X/Y placement as percentages of the free stage area. Size is
+relative to the existing character display size (10–250%), and rotation is
+available from -180° to 180°. These values are stored in the project timeline
+and are preserved when a clip is split.
+
+VRM rendering is performed through the Qt WebEngine viewer and requires a
+working WebGL context. The existing VO-SE synthesis, timeline audio rendering,
+audio mixdown, and MP4 muxing algorithms are unchanged.
 
 The viewer is served by a temporary HTTP server bound only to `127.0.0.1`.
 The selected VRM is exposed through a per-session random route. WebEngine local

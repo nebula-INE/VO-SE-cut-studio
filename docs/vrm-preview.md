@@ -1,26 +1,26 @@
 # VRM 3D character preview
 
 Axral Cut Studio includes an offline VRM preview based on Qt WebEngine, Three.js,
-and Pixiv's \`@pixiv/three-vrm\` runtime. The browser assets are copied into the
+and Pixiv's `@pixiv/three-vrm` runtime. The browser assets are copied into the
 application package; the running application does not download JavaScript from a CDN.
 
 ## Build the bundled viewer
 
-From \`web/vrm_viewer\`:
+From `web/vrm_viewer`:
 
-\`\`\`bash
+```bash
 npm install
 npm run build
-\`\`\`
+```
 
 This copies Three.js, its GLTFLoader/OrbitControls modules, and the three-vrm
-runtime into \`web/vrm_viewer/dist\`. The packaging workflow builds these assets
+runtime into `web/vrm_viewer/dist`. The packaging workflow builds these assets
 before running PyInstaller.
 
 ## Use
 
 1. Open **表示 → 3Dモード** (or 2D+3D).
-2. In the 3D character dock, click **VRMを開く...** and select a local \`.vrm\` file.
+2. In the 3D character dock, click **VRMを開く...** and select a local `.vrm` file.
 3. Drag to orbit and use the wheel to zoom.
 4. If a VMC/OSC or WebSocket mocap source is connected, normalized humanoid bone
    rotations and supported expressions are forwarded to the VRM preview.
@@ -44,6 +44,11 @@ SLERP. At playback time it drives the active VRM character clip. Hips position
 is retained, while child-bone rest positions are kept from the model so motion
 does not overwrite each avatar's bone lengths. When playback leaves a motion
 clip, the VRM returns to its rest pose or live VMC feed.
+
+When recording with a VRM model loaded but without an overlapping character
+clip, the recorder registers that model as an external project asset and
+creates the matching VRM character clip automatically. Existing 2D recording
+continues to create the built-in 2D character clip.
 
 Offline VRM frame rendering and VRM MP4 export are not included yet; those
 require a shared offscreen renderer and their own cross-platform tests. The

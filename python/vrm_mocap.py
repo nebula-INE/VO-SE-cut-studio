@@ -74,6 +74,8 @@ _VMC_EXPRESSION_MAP = {
     "blink": "blink",
     "blink_l": "blinkLeft",
     "blink_r": "blinkRight",
+    "blinkleft": "blinkLeft",
+    "blinkright": "blinkRight",
     "a": "aa",
     "aa": "aa",
     "i": "ih",

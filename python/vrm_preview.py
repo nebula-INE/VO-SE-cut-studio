@@ -399,6 +399,7 @@ class VRMViewerWidget(QWidget):
             "frame_rate": fps,
             "deadline": time.monotonic() + timeout,
             "event": threading.Event(),
+            "lock": threading.Lock(),
             "result": None,
             "error": None,
         }
@@ -417,11 +418,15 @@ class VRMViewerWidget(QWidget):
 
     @staticmethod
     def _finish_export_frame_request(request: dict, *, result=None, error=None) -> None:
-        if request["event"].is_set():
-            return
-        request["result"] = result
-        request["error"] = error
-        request["event"].set()
+        # A timeout is completed by the worker while the GUI thread may still
+        # be processing a queued WebEngine callback. Serialize completion so a
+        # late callback cannot overwrite the already-delivered timeout result.
+        with request["lock"]:
+            if request["event"].is_set():
+                return
+            request["result"] = result
+            request["error"] = error
+            request["event"].set()
 
     def _handle_export_frame_request(self, request: dict) -> None:
         """GUI-thread entry point for a blocking frame request from an export worker."""

@@ -177,3 +177,21 @@ def normalize_blend_shapes(values: Mapping[str, float]) -> dict[str, float]:
             continue
         normalized[name] = max(normalized.get(name, 0.0), min(1.0, max(0.0, weight)))
     return normalized
+
+def should_add_character_clip_for_recording(
+    *,
+    has_any_character_clip: bool,
+    has_vrm_character_clip: bool,
+    has_loaded_vrm_model: bool,
+) -> bool:
+    """Decide whether a recording needs a new character clip.
+
+    A loaded VRM model needs a matching VRM timeline reference even if a
+    built-in 2D character clip already overlaps the take. Without a loaded
+    VRM model, preserve the previous behavior and only add the 2D placeholder
+    when no character clip overlaps.
+    """
+    if has_loaded_vrm_model:
+        return not has_vrm_character_clip
+    return not has_any_character_clip
+

@@ -114,3 +114,34 @@ def test_recorded_keyframes_can_be_saved_and_reloaded(tmp_path):
     assert len(loaded) >= 3
     assert loaded[1]["head"]["x"] == pytest.approx(0.1)
     assert loaded[-1]["time"] >= 0.35
+
+
+def test_recorder_captures_vrm_head_and_full_body_positions(tmp_path):
+    now = [50.0]
+    recorder = MotionCaptureRecorder(clock=lambda: now[0])
+    recorder.start()
+
+    recorder.update_vrm_head(
+        0.1, 0.2, 0.3, 0.0, 0.0, 0.70710678, 0.70710678
+    )
+    recorder.update_vrm_bone(
+        "Hips", 0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0
+    )
+    recorder.update_vrm_bone(
+        "LeftUpperArm", 1.0, 2.0, 3.0, 0.0, 0.38268343, 0.0, 0.92387953
+    )
+    recorder.update_vrm_bone(
+        "UnknownBone", 0, 0, 0, 0, 0, 0, 1
+    )
+
+    now[0] += 1.0 / 30.0
+    assert recorder.capture()
+    now[0] += 0.2
+    frames = recorder.stop()
+
+    path = save_motion_file(tmp_path / "vrm-take.motion.json", frames)
+    loaded = load_motion_file(path)
+    assert loaded[1]["head_3d"]["position"] == pytest.approx([0.1, 0.2, 0.3])
+    assert loaded[1]["vrm_bones"]["Hips"]["position"] == pytest.approx([0.4, 0.5, 0.6])
+    assert "UnknownBone" not in loaded[1]["vrm_bones"]
+

@@ -139,6 +139,122 @@ def timeline_video_clips(
     return selected
 
 
+def _motion_entries_for_character(
+    model: TimelineModel,
+    character_clip: TimelineClip,
+    motion_entries: list[tuple[TimelineClip, list[dict]]],
+) -> list[tuple[TimelineClip, list[dict]]]:
+    """Select the motion track that drives one character clip.
+
+    A single visible motion track remains shared by all character tracks for
+    backward compatibility. When multiple character and motion tracks exist,
+    track order pairs character track 1 with motion track 1, and so on.
+    """
+    overlapping = [
+        (motion, frames)
+        for motion, frames in motion_entries
+        if motion.start < character_clip.end and motion.end > character_clip.start
+    ]
+    if not overlapping:
+        return []
+
+    character_tracks = [
+        track
+        for track in model.tracks
+        if track.kind in {"overlay", "other"}
+        and not track.muted
+        and track.visible
+        and any(
+            clip.kind == "character" and clip.enabled and clip.track_id == track.id
+            for clip in model.clips
+        )
+    ]
+    motion_tracks = [
+        track
+        for track in model.tracks
+        if track.kind == "motion" and not track.muted and track.visible
+    ]
+
+    # Preserve the original one-motion-track workflow: the same motion is
+    # available to each character track that overlaps it.
+    if len(character_tracks) <= 1 or len(motion_tracks) <= 1:
+        return overlapping
+
+    character_track_index = next(
+        (
+            index
+            for index, track in enumerate(character_tracks)
+            if track.id == character_clip.track_id
+        ),
+        None,
+    )
+    if character_track_index is None or character_track_index >= len(motion_tracks):
+        return []
+
+    target_track_id = motion_tracks[character_track_index].id
+    return [
+        (motion, frames)
+        for motion, frames in overlapping
+        if motion.track_id == target_track_id
+    ]
+
+
+def _character_lane_assignments(
+    character_clips: Iterable[TimelineClip],
+) -> dict[str, tuple[int, int]]:
+    """Assign stable horizontal stage lanes to overlapping character clips.
+
+    Clips in separate non-overlapping time ranges reuse the same stage slots.
+    The returned values are (zero-based lane index, lane count for that range).
+    """
+    ordered = sorted(
+        (
+            (clip.start, clip.end, index, clip)
+            for index, clip in enumerate(character_clips)
+        ),
+        key=lambda item: (item[0], item[2]),
+    )
+    assignments: dict[str, tuple[int, int]] = {}
+    components: list[list[tuple[float, float, int, TimelineClip]]] = []
+    current: list[tuple[float, float, int, TimelineClip]] = []
+    component_end = -math.inf
+
+    for item in ordered:
+        start, end, _index, _clip = item
+        if current and start >= component_end - 1e-9:
+            components.append(current)
+            current = []
+            component_end = -math.inf
+        current.append(item)
+        component_end = max(component_end, end)
+    if current:
+        components.append(current)
+
+    for component in components:
+        lane_ends: list[float] = []
+        pending: list[tuple[str, int]] = []
+        for start, end, _index, clip in component:
+            lane = next(
+                (
+                    lane_index
+                    for lane_index, lane_end in enumerate(lane_ends)
+                    if lane_end <= start + 1e-9
+                ),
+                len(lane_ends),
+            )
+            if lane == len(lane_ends):
+                lane_ends.append(end)
+            else:
+                lane_ends[lane] = end
+            pending.append((clip.id, lane))
+
+        lane_count = len(lane_ends)
+        for clip_id, lane in pending:
+            assignments[clip_id] = (lane, lane_count)
+
+    return assignments
+
+
 def _seconds(value: float, label: str) -> float:
     try:
         result = float(value)
@@ -208,8 +324,8 @@ def _character_state_at(
     if active_motion:
         if len(active_motion) > 1:
             raise VideoRenderError(
-                "同じ時間帯に複数のモーションクリップが重なっています。"
-                "2Dキャラクターごとに1つのモーションクリップを配置してください。"
+                "同じキャラクターに複数のモーションクリップが重なっています。"
+                "モーションを別々の時間帯または対応するトラックに配置してください。"
             )
         clip, frames = active_motion[0]
         state = sample_motion(frames, clip.source_in + timeline_time - clip.start)
@@ -413,6 +529,10 @@ def render_timeline_video(
     except OSError as exc:
         raise VideoRenderError(f"出力フォルダーを作成できません: {exc}") from exc
 
+    character_layouts = _character_lane_assignments(
+        clip for clip, _source in resolved if clip.kind == "character"
+    )
+
     work_dir = Path(tempfile.mkdtemp(prefix="aural-timeline-render-"))
     subtitle_dir = work_dir / "subtitles"
     character_dir = work_dir / "characters"
@@ -429,11 +549,9 @@ def render_timeline_video(
         ]
         for index, (clip, source) in enumerate(resolved):
             if clip.kind == "character":
-                overlapping_motion = [
-                    (motion, frames)
-                    for motion, frames in motion_entries
-                    if motion.start < clip.end and motion.end > clip.start
-                ]
+                overlapping_motion = _motion_entries_for_character(
+                    model, clip, motion_entries
+                )
                 if source is not None:
                     if vrm_frame_renderer is None:
                         raise VideoRenderError(
@@ -503,6 +621,15 @@ def render_timeline_video(
                     f"format=rgba[{source_label}]"
                 )
                 margin = max(8, int(height * 0.03))
+                lane, lane_count = character_layouts.get(clip.id, (0, 1))
+                if lane_count > 1:
+                    # Separate overlapping characters across the stage. A lone
+                    # character keeps the historical lower-left placement.
+                    x_position = (
+                        f"(W-w)*{_filter_number((lane + 1) / (lane_count + 1))}"
+                    )
+                else:
+                    x_position = str(margin)
                 next_label = f"base{index + 1}"
                 enable = (
                     f"gte(t,{_filter_number(clip.start)})*"
@@ -510,7 +637,7 @@ def render_timeline_video(
                 )
                 filters.append(
                     f"[{previous_label}][{source_label}]"
-                    f"overlay=x={margin}:y=H-h-{margin}:eof_action=pass:"
+                    f"overlay=x={x_position}:y=H-h-{margin}:eof_action=pass:"
                     f"repeatlast=0:shortest=0:enable='{enable}'[{next_label}]"
                 )
                 previous_label = next_label

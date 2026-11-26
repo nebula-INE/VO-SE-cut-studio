@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feat/vrm-timeline-mp4-export-v1]
+    branches: [main, feat/vrm-character-preview-v1, feat/vrm-timeline-mp4-export-v1]
   workflow_dispatch:
 
 permissions:

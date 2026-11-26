@@ -421,6 +421,7 @@ class MainWindow(QMainWindow):
         self._audio_render_task: _TimelineAudioRenderTask | None = None
         self._audio_video_export_task: _TimelineAudioVideoExportTask | None = None
         self._timeline_video_export_task: _TimelineFullVideoExportTask | None = None
+        self._hide_vrm_export_dock_after_export = False
         self._export_audio_mix_action = None
         self._export_audio_video_action = None
         self._export_timeline_video_action = None
@@ -1724,6 +1725,14 @@ class MainWindow(QMainWindow):
             )
             return
 
+        has_vrm_clips = any(
+            clip.kind == "character" and clip.asset_id is not None
+            for clip in visual_clips
+        )
+        if has_vrm_clips and self.preview_3d_dock is not None:
+            self._hide_vrm_export_dock_after_export = not self.preview_3d_dock.isVisible()
+            self.preview_3d_dock.show()
+
         task = _TimelineFullVideoExportTask(
             snapshot.to_dict(),
             asset_paths,
@@ -1749,6 +1758,9 @@ class MainWindow(QMainWindow):
 
     def _finish_timeline_full_video_export(self) -> None:
         self._timeline_video_export_task = None
+        if self._hide_vrm_export_dock_after_export and self.preview_3d_dock is not None:
+            self.preview_3d_dock.hide()
+        self._hide_vrm_export_dock_after_export = False
         self._set_audio_export_actions_enabled(
             self._audio_render_task is None
             and self._audio_video_export_task is None

@@ -59,3 +59,53 @@ def test_vmc_blend_shapes_map_to_vrm_presets_and_clamp() -> None:
 def test_expression_values_ignore_nan_and_keep_max_alias_weight() -> None:
     result = normalize_blend_shapes({"Joy": 0.4, "happy": 0.8, "Angry": math.nan})
     assert result == {"happy": 0.8}
+
+def test_v1_v2_motion_state_maps_to_normalized_vrm_pose():
+    from vrm_mocap import motion_state_to_vrm_state
+
+    pose = motion_state_to_vrm_state({
+        "head_3d": {
+            "position": [0.1, 0.2, 0.3],
+            "rotation": [0.0, 0.0, 0.0, 2.0],
+        },
+        "vrm_bones": {
+            "Hips": {
+                "position": [0.4, 0.5, 0.6],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+            },
+            "LeftUpperArm": {
+                "position": [9.0, 9.0, 9.0],
+                "rotation": [0.0, 0.0, 0.5, 0.8660254],
+            },
+        },
+        "blend_shapes": {"Joy": 0.8, "Blink_L": 0.7, "Blink_R": 0.2},
+        "vowels": {"A": 0.6},
+    })
+
+    assert pose["bones"]["head"]["position"] == (0.1, 0.2, 0.3)
+    assert pose["bones"]["head"]["rotation"] == (0.0, 0.0, 0.0, 1.0)
+    assert pose["bones"]["hips"]["position"] == (0.4, 0.5, 0.6)
+    assert "position" not in pose["bones"]["leftUpperArm"]
+    assert pose["expressions"] == {
+        "happy": 0.8,
+        "blinkLeft": 0.7,
+        "blinkRight": 0.2,
+        "aa": 0.6,
+    }
+
+
+def test_legacy_motion_pose_maps_2d_head_and_arm_quaternion():
+    from vrm_mocap import motion_state_to_vrm_state
+
+    pose = motion_state_to_vrm_state({
+        "head": {"x": 0.1, "y": -0.2, "tilt_deg": 90.0},
+        "bones": {"LeftUpperArm": [0.0, 0.0, 0.0, 1.0]},
+        "blend_shapes": {"Joy": 0.5},
+        "vowels": {},
+    })
+
+    assert pose["bones"]["head"]["position"] == (0.1, -0.2, 0.0)
+    assert pose["bones"]["head"]["rotation"][2] == pytest.approx(math.sqrt(0.5))
+    assert "leftUpperArm" in pose["bones"]
+    assert pose["expressions"]["happy"] == pytest.approx(0.5)
+

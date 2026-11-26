@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -377,6 +377,10 @@ class VRMViewerWidget(QWidget):
         WebEngine operation. No QWidget or QWebEngine object is touched by the
         worker thread.
         """
+        if QThread.currentThread() == self.thread():
+            raise RuntimeError(
+                "VRM frame capture must be requested from a worker thread"
+            )
         try:
             fps = float(frame_rate)
             timeout = float(timeout_seconds)
@@ -400,6 +404,9 @@ class VRMViewerWidget(QWidget):
         }
         self._export_frame_requested.emit(request)
         if not request["event"].wait(timeout + 1.0):
+            self._finish_export_frame_request(
+                request, error="VRM frame renderer did not respond before the timeout"
+            )
             raise TimeoutError("VRM frame renderer did not respond before the timeout")
         if request["error"] is not None:
             raise RuntimeError(str(request["error"]))
@@ -475,8 +482,14 @@ class VRMViewerWidget(QWidget):
             )
             return
 
-        pose = json.dumps(request["pose"], allow_nan=False, separators=(",", ":"))
-        fps = json.dumps(request["frame_rate"])
+        try:
+            pose = json.dumps(request["pose"], allow_nan=False, separators=(",", ":"))
+            fps = json.dumps(request["frame_rate"])
+        except (TypeError, ValueError) as exc:
+            self._finish_export_frame_request(
+                request, error=f"Invalid VRM pose for export: {exc}"
+            )
+            return
         script = (
             "window.axralVrmViewer.renderFrameDataUrl("
             + pose
@@ -501,6 +514,8 @@ class VRMViewerWidget(QWidget):
             return
         try:
             encoded = data_url.partition(",")[2]
+            if len(encoded) > 64 * 1024 * 1024:
+                raise ValueError("VRM PNG frame exceeds 48MiB encoded limit")
             image = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error) as exc:
             self._finish_export_frame_request(

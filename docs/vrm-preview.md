@@ -66,10 +66,16 @@ on. A single visible Motion track remains shared across character tracks for
 backward compatibility. Overlapping motion clips on the same paired track are
 rejected as ambiguous instead of silently mixing two poses.
 
+Select a character clip to edit its stage transform in the timeline controls.
+**自動配置** keeps the existing lower-left/smart multi-character placement.
+Disable it to set X/Y placement as percentages of the free stage area. Size is
+relative to the existing character display size (10–250%), and rotation is
+available from -180° to 180°. These values are stored in the project timeline
+and are preserved when a clip is split.
+
 VRM rendering is performed through the Qt WebEngine viewer and requires a
-working WebGL context. The existing 2D character renderer, VO-SE synthesis,
-timeline audio rendering, audio mixdown, and MP4 muxing algorithms are
-unchanged.
+working WebGL context. The existing VO-SE synthesis, timeline audio rendering,
+audio mixdown, and MP4 muxing algorithms are unchanged.
 
 The viewer is served by a temporary HTTP server bound only to `127.0.0.1`.
 The selected VRM is exposed through a per-session random route. WebEngine local

@@ -82,9 +82,22 @@ def build_application() -> Path:
         "--paths", str(build_dir),
         "--hidden-import", "aural_engine",
         "--hidden-import", "PySide6.QtOpenGLWidgets",
+        "--hidden-import", "PySide6.QtWebEngineWidgets",
+        "--hidden-import", "PySide6.QtWebEngineCore",
+        "--collect-all", "PySide6.QtWebEngineWidgets",
+        "--collect-all", "PySide6.QtWebEngineCore",
         "--collect-all", "pyopenjtalk",
         "--hidden-import", "OpenGL.GL",
     ]
+    viewer_dist = ROOT / "web" / "vrm_viewer" / "dist"
+    viewer_index = viewer_dist / "index.html"
+    if not viewer_index.is_file():
+        raise RuntimeError(
+            "VRM viewer assets are missing. Run npm install and npm run build "
+            "inside web/vrm_viewer before packaging."
+        )
+    arguments.extend(("--add-data", f"{viewer_dist}{os.pathsep}vrm_viewer"))
+
     add_binary(arguments, native_library, "native")
     # Homebrew FFmpeg uses dylib basenames that can collide with Qt's private
     # FFmpeg build inside PySide6. On macOS use the user's Homebrew installation.

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feat/vrm-character-preview-v1, feat/vrm-timeline-mp4-export-v1]
   workflow_dispatch:
 
 permissions:
@@ -35,6 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build offline VRM viewer
+        working-directory: web/vrm_viewer
+        run: |
+          npm install --no-audit --no-fund
+          npm run check
+          npm run build
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -52,9 +64,16 @@ jobs:
         run: |
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install ffmpeg:x64-windows
-          "$PWD\vcpkg\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "$PWD\vcpkg\installed\x64-windows\tools\ffmpeg\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # The library features alone do not install the ffmpeg/ffprobe CLI binaries.
+          .\vcpkg\vcpkg install "ffmpeg[ffmpeg,ffprobe]:x64-windows"
+          $toolDir = "$PWD\vcpkg\installed\x64-windows\tools\ffmpeg"
+          $ffmpegExe = Join-Path $toolDir "ffmpeg.exe"
+          $ffprobeExe = Join-Path $toolDir "ffprobe.exe"
+          if (!(Test-Path $ffmpegExe) -or !(Test-Path $ffprobeExe)) {
+            throw "vcpkg did not install ffmpeg.exe and ffprobe.exe under $toolDir"
+          }
+          $toolDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$toolDir\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "$PWD\vcpkg\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           choco install innosetup --yes --no-progress
 
@@ -70,7 +89,16 @@ jobs:
             build-essential cmake pkg-config dpkg-dev ffmpeg \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev \
             libgl1-mesa-dev libglu1-mesa-dev libgl1 libegl1 libpulse0 \
-            libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0 fonts-noto-cjk
+            libnss3 libnspr4 libcups2 libgtk-3-0 libatk1.0-0 \
+            libatk-bridge2.0-0 libatspi2.0-0 libgbm1 libdrm2 \
+            libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0 \
+            libxcb-dri3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxext6 \
+            libxfixes3 libxrandr2 libxkbfile1 libxtst6 libxshmfence1 fonts-noto-cjk
+          if apt-cache show libasound2t64 >/dev/null 2>&1; then
+            sudo apt-get install -y libasound2t64
+          else
+            sudo apt-get install -y libasound2
+          fi
 
       - name: Configure Windows native build
         if: runner.os == 'Windows'

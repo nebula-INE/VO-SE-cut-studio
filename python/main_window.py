@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import platform
 import subprocess
 import sys
@@ -57,7 +58,16 @@ from timeline_video_render import (
     timeline_motion_clips,
     timeline_video_clips,
 )
-from character_motion import save_motion_file
+from character_motion import (
+    CharacterMotionError,
+    load_motion_file,
+    sample_motion,
+    save_motion_file,
+)
+from vrm_mocap import (
+    motion_state_to_vrm_pose,
+    should_add_character_clip_for_recording,
+)
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
     MAX_RECORDING_SECONDS,
@@ -78,10 +88,18 @@ except ImportError:
     _WEBSOCKET_AVAILABLE = False
 
 try:
-    from preview_3d import Head3DPreviewWidget
-    _PREVIEW_3D_AVAILABLE = True
+    from vrm_preview import VRMViewerWidget
+    _VRM_VIEWER_AVAILABLE = True
 except ImportError:
-    _PREVIEW_3D_AVAILABLE = False
+    _VRM_VIEWER_AVAILABLE = False
+
+try:
+    from preview_3d import Head3DPreviewWidget
+    _HEAD3D_PREVIEW_AVAILABLE = True
+except ImportError:
+    _HEAD3D_PREVIEW_AVAILABLE = False
+
+_PREVIEW_3D_AVAILABLE = _VRM_VIEWER_AVAILABLE or _HEAD3D_PREVIEW_AVAILABLE
 
 _MOCAP_AVAILABLE = _OSC_AVAILABLE or _WEBSOCKET_AVAILABLE
 
@@ -102,7 +120,11 @@ class _MocapBridge(QObject):
     # 生成されるが、ロール角だけに単純化していない生のクォータニオンをそのまま運ぶ。
     blend_shapes_received = Signal(dict)  # {ブレンドシェイプ名: 0〜1}
     bone_transform_received = Signal(str, float, float, float, float)
-    # (ボーン名, qx, qy, qz, qw) -- Head以外のボーン(腕など)。2Dキャラの腕に反映する。
+    # (ボーン名, qx, qy, qz, qw) -- 既存2Dレンダラー向け。シグネチャは維持する。
+    bone_transform_3d_received = Signal(
+        str, float, float, float, float, float, float, float
+    )
+    # (ボーン名, x, y, z, qx, qy, qz, qw) -- VRM用に元の位置も保持する。
 
     def __init__(
         self,
@@ -145,6 +167,10 @@ class _MocapBridge(QObject):
 
     def _on_bone_transform(self, bone) -> None:
         self.bone_transform_received.emit(bone.name, bone.qx, bone.qy, bone.qz, bone.qw)
+        self.bone_transform_3d_received.emit(
+            bone.name, bone.x, bone.y, bone.z,
+            bone.qx, bone.qy, bone.qz, bone.qw,
+        )
 
     def start(self) -> None:
         if self._osc_receiver is not None:
@@ -360,6 +386,7 @@ class MainWindow(QMainWindow):
         self._project.script = self.script_panel.model.to_dict()
         self._pending_generated_audio: dict[str, tuple[str, str]] = {}
         self._motion_capture_recorder = MotionCaptureRecorder()
+        self._vrm_motion_cache: dict[str, tuple[str, int, list[dict]]] = {}
         self._motion_capture_timer = QTimer(self)
         self._motion_capture_timer.setInterval(round(1000 / MOTION_CAPTURE_FRAME_RATE))
         self._motion_capture_timer.timeout.connect(self._capture_motion_frame)
@@ -444,28 +471,37 @@ class MainWindow(QMainWindow):
             self.mocap_bridge.blend_shapes_received.connect(self.preview_panel.set_blend_shapes)
             self.mocap_bridge.bone_transform_received.connect(self.preview_panel.set_bone_transform)
             self.mocap_bridge.head_transform_received.connect(self._record_motion_head)
+            self.mocap_bridge.head_quaternion_received.connect(self._record_motion_head_3d)
             self.mocap_bridge.blend_shapes_received.connect(self._record_motion_blend_shapes)
             self.mocap_bridge.bone_transform_received.connect(self._record_motion_bone)
+            self.mocap_bridge.bone_transform_3d_received.connect(self._record_motion_bone_3d)
             self.mocap_bridge.start()
 
-        # 3Dプレビュー(モード切り替え): 2Dキャラクター(上記)と全く同じ
-        # モーションキャプチャデータで、簡易3Dヘッドプロキシを駆動する。
-        # 「共通モーションキャプチャエンジンを2D/3D両方に流し込める」ことの
-        # 実証用ドック。デフォルトでは非表示(2Dモード相当)。
+        # VRM 3Dプレビュー。WebEngineが利用できる配布環境では実際のVRM
+        # モデルを表示し、同じVMC受信経路からHumanoidボーンと表情を駆動する。
+        # WebEngineがない開発環境では従来のヘッドプロキシをフォールバック表示する。
         self.preview_3d_dock: QDockWidget | None = None
         if _PREVIEW_3D_AVAILABLE:
-            self.preview_3d_widget = Head3DPreviewWidget()
-            self.preview_3d_dock = QDockWidget("3Dプレビュー(モーションキャプチャ)", self)
+            if _VRM_VIEWER_AVAILABLE:
+                self.preview_3d_widget = VRMViewerWidget()
+            else:
+                self.preview_3d_widget = Head3DPreviewWidget()
+            self.preview_3d_dock = QDockWidget("3Dキャラクター / VRMプレビュー", self)
             self.preview_3d_dock.setWidget(self.preview_3d_widget)
             self.preview_3d_dock.setFeatures(
                 QDockWidget.DockWidgetFeature.DockWidgetMovable
                 | QDockWidget.DockWidgetFeature.DockWidgetFloatable
             )
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.preview_3d_dock)
-            self.preview_3d_dock.hide()  # デフォルトは2Dモード相当(3Dは非表示)
+            self.preview_3d_dock.hide()
 
             if self.mocap_bridge is not None:
                 self.mocap_bridge.head_quaternion_received.connect(self.preview_3d_widget.set_head_quaternion)
+                if _VRM_VIEWER_AVAILABLE:
+                    self.mocap_bridge.blend_shapes_received.connect(self.preview_3d_widget.set_blend_shapes)
+                    self.mocap_bridge.bone_transform_3d_received.connect(
+                        self.preview_3d_widget.set_bone_transform_3d
+                    )
 
         self._build_menu()
         self._refresh_window_title()
@@ -1043,6 +1079,7 @@ class MainWindow(QMainWindow):
         self.timeline_audio.pause()
         self.timeline_panel.set_playback_state(False)
         self.timeline_panel.set_playhead(0.0)
+        self._update_vrm_timeline_pose(0.0)
         if self.preview_panel.decoder is not None:
             clip = self._video_clip_at(0.0)
             active_asset_id = self._project.settings.get("active_video_asset_id")
@@ -1058,6 +1095,7 @@ class MainWindow(QMainWindow):
         if not self._timeline_playback_requested or self.preview_panel.is_playing:
             return
         self.timeline_panel.set_playhead(seconds)
+        self._update_vrm_timeline_pose(seconds)
 
         if self._pending_timeline_clip_id is None:
             clip = self._video_clip_at(seconds)
@@ -1083,6 +1121,7 @@ class MainWindow(QMainWindow):
         if clip is not None and clip.kind == "video":
             timeline_seconds = clip.timeline_time_at(source_seconds)
             self.timeline_panel.set_playhead(timeline_seconds)
+            self._update_vrm_timeline_pose(timeline_seconds)
             if self._timeline_playback_requested and self.preview_panel.is_playing:
                 if self.timeline_audio.is_playing:
                     self.timeline_audio.sync_to_timeline(timeline_seconds)
@@ -1096,6 +1135,7 @@ class MainWindow(QMainWindow):
                 self._advance_timeline_video_clip(clip)
         else:
             self.timeline_panel.set_playhead(source_seconds)
+            self._update_vrm_timeline_pose(source_seconds)
 
     def _on_preview_playback_state_changed(self, playing: bool) -> None:
         """Track user transport changes and start/stop the timeline audio clock."""
@@ -1249,6 +1289,7 @@ class MainWindow(QMainWindow):
         if not self._timeline_playback_transition:
             self._timeline_playback_generation += 1
             self._pending_timeline_clip_id = None
+        self._update_vrm_timeline_pose(seconds)
         if self.timeline_audio.is_playing:
             self.timeline_audio.sync_to_timeline(seconds)
         clip = self._video_clip_at(seconds)
@@ -1291,7 +1332,28 @@ class MainWindow(QMainWindow):
         if not clip_id:
             return
         clip = self.timeline_panel.model.get_clip(clip_id)
-        if clip is None or clip.kind != "video" or clip.asset_id is None:
+        if clip is None or clip.asset_id is None:
+            return
+        if clip.kind == "character" and _VRM_VIEWER_AVAILABLE:
+            character_asset = self._project.get_asset(clip.asset_id)
+            if character_asset is None:
+                self.statusBar().showMessage("キャラクター素材が見つかりません", 5000)
+                return
+            try:
+                character_path = self._project.resolve_asset(character_asset)
+                if character_path.suffix.lower() != ".vrm":
+                    self.statusBar().showMessage(
+                        "現在の3DプレビューはVRM 0.x / 1.0の .vrm 素材に対応しています",
+                        6000,
+                    )
+                    return
+                self.preview_3d_widget.load_model(str(character_path))
+                if self.preview_3d_dock is not None:
+                    self.preview_3d_dock.show()
+            except (OSError, ProjectError) as exc:
+                QMessageBox.warning(self, "VRMモデルを開けません", str(exc))
+            return
+        if clip.kind != "video":
             return
         asset = self._project.get_asset(clip.asset_id)
         if asset is None:
@@ -1713,6 +1775,41 @@ class MainWindow(QMainWindow):
             except MotionCaptureRecordingError as exc:
                 self.statusBar().showMessage(f"モーション値を無視しました: {exc}", 5000)
 
+    def _record_motion_head_3d(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_head_3d(x, y, z, qx, qy, qz, qw)
+            except (MotionCaptureRecordingError, TypeError, ValueError) as exc:
+                self.statusBar().showMessage(f"VRM頭部データを無視しました: {exc}", 5000)
+
+    def _record_motion_bone_3d(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_bone_3d(
+                    name, x, y, z, qx, qy, qz, qw
+                )
+            except (MotionCaptureRecordingError, TypeError, ValueError) as exc:
+                self.statusBar().showMessage(f"VRMボーンデータを無視しました: {exc}", 5000)
+
     def _record_motion_blend_shapes(self, values: dict) -> None:
         if self._motion_capture_recorder.is_recording:
             try:
@@ -1728,6 +1825,89 @@ class MainWindow(QMainWindow):
                 self._motion_capture_recorder.update_bone(name, qx, qy, qz, qw)
             except MotionCaptureRecordingError as exc:
                 self.statusBar().showMessage(f"ボーンデータを無視しました: {exc}", 5000)
+
+    def _update_vrm_timeline_pose(self, timeline_seconds: float) -> None:
+        """Sample an active motion clip and apply it to the currently active VRM."""
+        if not _VRM_VIEWER_AVAILABLE or self.preview_3d_dock is None:
+            return
+        try:
+            model = self.timeline_panel.model
+            active_characters = []
+            for clip in model.clips:
+                if clip.kind != "character" or not clip.enabled:
+                    continue
+                if not clip.start <= timeline_seconds < clip.end:
+                    continue
+                track = model.get_track(clip.track_id)
+                if track is None or track.muted or not track.visible or clip.asset_id is None:
+                    continue
+                asset = self._project.get_asset(clip.asset_id)
+                if asset is None:
+                    continue
+                path = self._project.resolve_asset(asset)
+                if path.suffix.lower() == ".vrm" and path.is_file():
+                    active_characters.append((clip, path))
+
+            if len(active_characters) > 1:
+                self.preview_3d_widget.set_timeline_state(None)
+                self.statusBar().showMessage(
+                    "同じ時間帯に複数のVRMキャラクターがあります。1体ずつ配置してください。",
+                    5000,
+                )
+                return
+            if active_characters:
+                _clip, character_path = active_characters[0]
+                if self.preview_3d_widget.model_path != character_path.resolve():
+                    self.preview_3d_widget.load_model(character_path)
+                if not self.preview_3d_dock.isVisible():
+                    self.preview_3d_dock.show()
+
+            active_motion = []
+            for clip in model.clips:
+                if clip.kind != "motion" or not clip.enabled or clip.asset_id is None:
+                    continue
+                if not clip.start <= timeline_seconds < clip.end:
+                    continue
+                track = model.get_track(clip.track_id)
+                if track is None or track.muted or not track.visible:
+                    continue
+                active_motion.append(clip)
+
+            if not active_motion:
+                self.preview_3d_widget.set_timeline_state(None)
+                return
+            if len(active_motion) > 1:
+                self.preview_3d_widget.set_timeline_state(None)
+                self.statusBar().showMessage(
+                    "VRM再生中のモーションクリップが重なっています。",
+                    5000,
+                )
+                return
+
+            motion_clip = active_motion[0]
+            asset = self._project.get_asset(motion_clip.asset_id)
+            if asset is None:
+                self.preview_3d_widget.set_timeline_state(None)
+                return
+            source = self._project.resolve_asset(asset)
+            stat = source.stat()
+            cached = self._vrm_motion_cache.get(asset.id)
+            if cached is None or cached[0] != str(source) or cached[1] != stat.st_mtime_ns:
+                frames = load_motion_file(source)
+                self._vrm_motion_cache[asset.id] = (
+                    str(source), stat.st_mtime_ns, frames
+                )
+            else:
+                frames = cached[2]
+
+            local_time = motion_clip.source_in + timeline_seconds - motion_clip.start
+            sampled = sample_motion(frames, local_time)
+            self.preview_3d_widget.set_timeline_state(
+                motion_state_to_vrm_pose(sampled)
+            )
+        except (OSError, ProjectError, CharacterMotionError, TypeError, ValueError) as exc:
+            self.preview_3d_widget.set_timeline_state(None)
+            self.statusBar().showMessage(f"VRMモーションを再生できません: {exc}", 6000)
 
     def start_motion_capture_recording(self) -> None:
         """Start recording live OSC/VMC or WebSocket state into motion keyframes."""
@@ -1795,6 +1975,8 @@ class MainWindow(QMainWindow):
 
         temporary_path: Path | None = None
         asset = None
+        character_asset = None
+        character_asset_created = False
         motion_clip_id: str | None = None
         character_clip_id: str | None = None
         try:
@@ -1823,8 +2005,41 @@ class MainWindow(QMainWindow):
                 and (track := model.get_track(clip.track_id)) is not None
                 and not track.muted and track.visible
             ]
+            overlapping_vrm_characters = []
+            for clip in overlapping_characters:
+                if clip.asset_id is None:
+                    continue
+                existing_character_asset = self._project.get_asset(clip.asset_id)
+                if existing_character_asset is None:
+                    continue
+                try:
+                    existing_character_path = self._project.resolve_asset(
+                        existing_character_asset
+                    )
+                except (OSError, ProjectError):
+                    continue
+                if existing_character_path.suffix.lower() == ".vrm":
+                    overlapping_vrm_characters.append(clip)
 
-            if not overlapping_characters:
+            loaded_vrm_path = (
+                self.preview_3d_widget.model_path
+                if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None
+                else None
+            )
+            active_vrm_model = (
+                loaded_vrm_path is not None and loaded_vrm_path.is_file()
+            )
+            # A pre-existing 2D character clip must not suppress the VRM clip:
+            # otherwise a saved VRM take has no model reference when reopened.
+            should_add_character = should_add_character_clip_for_recording(
+                has_any_character_clip=bool(overlapping_characters),
+                has_vrm_character_clip=bool(overlapping_vrm_characters),
+                has_loaded_vrm_model=active_vrm_model,
+            )
+            needs_vrm_character = should_add_character and active_vrm_model
+            needs_2d_character = should_add_character and not active_vrm_model
+
+            if needs_vrm_character or needs_2d_character:
                 overlay_tracks = [
                     track for track in model.tracks
                     if track.kind == "overlay"
@@ -1835,14 +2050,32 @@ class MainWindow(QMainWindow):
                         1 for track in model.tracks if track.kind == "overlay"
                     )
                     overlay_tracks = [model.add_track(f"Overlay {count}", "overlay")]
-                character = model.add_clip(
-                    overlay_tracks[0].id,
-                    "character",
-                    "2D Character",
-                    duration,
-                    start=start,
-                    script_line_id=BUILTIN_2D_CHARACTER_ID,
-                )
+
+                if active_vrm_model:
+                    existing_asset_ids = {item.id for item in self._project.assets}
+                    character_asset = self._project.add_asset(
+                        loaded_vrm_path,
+                        "character",
+                        copy_into_project=False,
+                    )
+                    character_asset_created = character_asset.id not in existing_asset_ids
+                    character = model.add_clip(
+                        overlay_tracks[0].id,
+                        "character",
+                        character_asset.name,
+                        duration,
+                        start=start,
+                        asset_id=character_asset.id,
+                    )
+                else:
+                    character = model.add_clip(
+                        overlay_tracks[0].id,
+                        "character",
+                        "2D Character",
+                        duration,
+                        start=start,
+                        script_line_id=BUILTIN_2D_CHARACTER_ID,
+                    )
                 character_clip_id = character.id
 
             motion_tracks = [
@@ -1886,6 +2119,14 @@ class MainWindow(QMainWindow):
             if asset is not None:
                 try:
                     self._project.remove_asset(asset.id, delete_managed_file=True)
+                except (OSError, ProjectError):
+                    pass
+            if character_asset is not None and character_asset_created:
+                try:
+                    self._project.remove_asset(
+                        character_asset.id,
+                        delete_managed_file=False,
+                    )
                 except (OSError, ProjectError):
                     pass
             self.timeline_panel.refresh()
@@ -2340,6 +2581,8 @@ class MainWindow(QMainWindow):
         self.script_panel.cleanup()
         if self.mocap_bridge is not None:
             self.mocap_bridge.stop()
+        if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None:
+            self.preview_3d_widget.shutdown()
         super().closeEvent(event)
 
 
@@ -2350,6 +2593,10 @@ def main() -> int:
             print("VO-SE native library was not found in the application bundle", file=sys.stderr)
             return 2
         try:
+            if not _VRM_VIEWER_AVAILABLE:
+                raise RuntimeError(
+                    "Qt WebEngine VRM preview is unavailable in this application bundle"
+                )
             from vose_engine import VoseEngine
 
             version = VoseEngine(library_path).get_engine_version()
@@ -2374,6 +2621,7 @@ def main() -> int:
         print(f"Axral Cut Studio runtime OK; VO-SE engine {version:g}")
         print(f"FFmpeg: {ffmpeg}")
         print(f"FFprobe: {ffprobe}")
+        print("VRM preview: Qt WebEngine module import OK")
         return 0
 
     app = QApplication(sys.argv)

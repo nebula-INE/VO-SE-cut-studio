@@ -1,4 +1,4 @@
-"""Validated keyframe data for offline 2D character animation export.
+"""Validated keyframe data for offline 2D and VRM character animation.
 
 Motion files are simple UTF-8 JSON documents so recordings can be created by
 mocap tools, scripts, or hand-authored without a Qt dependency.
@@ -13,10 +13,29 @@ from pathlib import Path
 from typing import Any
 
 MOTION_FORMAT = "aural-motion"
-MOTION_VERSION = 1
-MAX_MOTION_FILE_BYTES = 10 * 1024 * 1024
+MOTION_VERSION = 2
+LEGACY_MOTION_VERSION = 1
+MAX_MOTION_FILE_BYTES = 128 * 1024 * 1024
 SUPPORTED_BONES = frozenset({
     "LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm",
+})
+SUPPORTED_VRM_BONES = frozenset({
+    "hips", "spine", "chest", "upperChest", "neck", "head",
+    "leftShoulder", "leftUpperArm", "leftLowerArm", "leftHand",
+    "rightShoulder", "rightUpperArm", "rightLowerArm", "rightHand",
+    "leftUpperLeg", "leftLowerLeg", "leftFoot", "leftToes",
+    "rightUpperLeg", "rightLowerLeg", "rightFoot", "rightToes",
+    "leftEye", "rightEye", "jaw",
+    "leftThumbMetacarpal", "leftThumbProximal", "leftThumbDistal",
+    "leftIndexProximal", "leftIndexIntermediate", "leftIndexDistal",
+    "leftMiddleProximal", "leftMiddleIntermediate", "leftMiddleDistal",
+    "leftRingProximal", "leftRingIntermediate", "leftRingDistal",
+    "leftLittleProximal", "leftLittleIntermediate", "leftLittleDistal",
+    "rightThumbMetacarpal", "rightThumbProximal", "rightThumbDistal",
+    "rightIndexProximal", "rightIndexIntermediate", "rightIndexDistal",
+    "rightMiddleProximal", "rightMiddleIntermediate", "rightMiddleDistal",
+    "rightRingProximal", "rightRingIntermediate", "rightRingDistal",
+    "rightLittleProximal", "rightLittleIntermediate", "rightLittleDistal",
 })
 SUPPORTED_VOWELS = frozenset({"A", "I", "U", "E", "O"})
 
@@ -65,6 +84,25 @@ def _quaternion(value: Any, label: str) -> tuple[float, float, float, float]:
     return tuple(item / length for item in components)  # type: ignore[return-value]
 
 
+def _vector3(value: Any, label: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise CharacterMotionError(f"{label} must be [x, y, z]")
+    return tuple(_finite_number(item, label) for item in value)  # type: ignore[return-value]
+
+
+def _normalize_vrm_transform(raw: Any, label: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise CharacterMotionError(f"{label} must be an object")
+    result: dict[str, Any] = {}
+    if "position" in raw:
+        result["position"] = _vector3(raw["position"], f"{label}.position")
+    if "rotation" in raw:
+        result["rotation"] = _quaternion(raw["rotation"], f"{label}.rotation")
+    if not result:
+        raise CharacterMotionError(f"{label} must contain position or rotation")
+    return result
+
+
 def _normalize_keyframe(raw: Any, index: int) -> dict[str, Any]:
     label = f"keyframes[{index}]"
     if not isinstance(raw, dict):
@@ -103,11 +141,34 @@ def _normalize_keyframe(raw: Any, index: int) -> dict[str, Any]:
         normalized_bones[name] = _quaternion(value, f"{label}.bones.{name}")
     if normalized_bones:
         result["bones"] = normalized_bones
+
+    vrm = raw.get("vrm", {})
+    if not isinstance(vrm, dict):
+        raise CharacterMotionError(f"{label}.vrm must be an object")
+    normalized_vrm: dict[str, Any] = {}
+    if "head" in vrm:
+        normalized_vrm["head"] = _normalize_vrm_transform(
+            vrm["head"], f"{label}.vrm.head"
+        )
+    vrm_bones = vrm.get("bones", {})
+    if not isinstance(vrm_bones, dict):
+        raise CharacterMotionError(f"{label}.vrm.bones must be an object")
+    normalized_vrm_bones = {}
+    for name, transform in vrm_bones.items():
+        if name not in SUPPORTED_VRM_BONES:
+            raise CharacterMotionError(f"Unsupported VRM humanoid bone name: {name}")
+        normalized_vrm_bones[name] = _normalize_vrm_transform(
+            transform, f"{label}.vrm.bones.{name}"
+        )
+    if normalized_vrm_bones:
+        normalized_vrm["bones"] = normalized_vrm_bones
+    if normalized_vrm:
+        result["vrm"] = normalized_vrm
     return result
 
 
 def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
-    """Load and validate an aural-motion v1 JSON file."""
+    """Load and validate a backward-compatible aural-motion v1/v2 JSON file."""
     source = Path(path).expanduser()
     try:
         size = source.stat().st_size
@@ -123,8 +184,9 @@ def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
 
     if not isinstance(payload, dict) or payload.get("format") != MOTION_FORMAT:
         raise CharacterMotionError(f"Motion file must have format={MOTION_FORMAT!r}")
-    if type(payload.get("version")) is not int or payload["version"] != MOTION_VERSION:
-        raise CharacterMotionError(f"Unsupported motion format version: {payload.get('version')!r}")
+    version = payload.get("version")
+    if type(version) is not int or version not in (LEGACY_MOTION_VERSION, MOTION_VERSION):
+        raise CharacterMotionError(f"Unsupported motion format version: {version!r}")
     frames = payload.get("keyframes")
     if not isinstance(frames, list) or not frames:
         raise CharacterMotionError("Motion file must contain at least one keyframe")
@@ -162,6 +224,60 @@ def _slerp(
     return tuple(left_weight * a + right_weight * b for a, b in zip(left, right))  # type: ignore[return-value]
 
 
+def _interpolate_vrm_transform(
+    left: dict[str, Any] | None,
+    right: dict[str, Any] | None,
+    amount: float,
+) -> dict[str, Any]:
+    if left is None and right is None:
+        return {}
+    left_values = left or {}
+    right_values = right or {}
+    result: dict[str, Any] = {}
+
+    # Recordings start with an empty snapshot before the first incoming VMC
+    # packet. Blend that first packet from a neutral transform instead of
+    # snapping the avatar into the pose before the first recorded timestamp.
+    if "position" in right_values:
+        start_position = left_values.get("position", (0.0, 0.0, 0.0))
+        result["position"] = tuple(
+            _lerp(a, b, amount)
+            for a, b in zip(start_position, right_values["position"])
+        )
+    elif "position" in left_values:
+        result["position"] = left_values["position"]
+
+    if "rotation" in right_values:
+        start_rotation = left_values.get("rotation", (0.0, 0.0, 0.0, 1.0))
+        result["rotation"] = _slerp(start_rotation, right_values["rotation"], amount)
+    elif "rotation" in left_values:
+        result["rotation"] = left_values["rotation"]
+    return result
+
+
+def _interpolate_vrm(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    amount: float,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    head = _interpolate_vrm_transform(left.get("head"), right.get("head"), amount)
+    if head:
+        result["head"] = head
+    left_bones = left.get("bones", {})
+    right_bones = right.get("bones", {})
+    bones = {}
+    for name in set(left_bones) | set(right_bones):
+        transform = _interpolate_vrm_transform(
+            left_bones.get(name), right_bones.get(name), amount
+        )
+        if transform:
+            bones[name] = transform
+    if bones:
+        result["bones"] = bones
+    return result
+
+
 def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str, Any]:
     """Interpolate one animation state at a source-relative timestamp."""
     if not keyframes:
@@ -171,6 +287,7 @@ def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str,
             "blend_shapes": {},
             "vowels": {},
             "bones": {},
+            "vrm": {},
         }
     timestamp = max(0.0, _finite_number(time_sec, "motion sample time"))
     right_index = next(
@@ -221,12 +338,17 @@ def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str,
         else:
             bones[name] = _slerp(left_bones[name], right_bones[name], amount)
 
+    left_vrm = left.get("vrm", {})
+    right_vrm = right.get("vrm", {})
+    vrm = _interpolate_vrm(left_vrm, right_vrm, amount)
+
     return {
         "mouth_openness": max(0.0, min(1.0, mouth)),
         "head": head,
         "blend_shapes": interpolate_weights("blend_shapes"),
         "vowels": interpolate_weights("vowels"),
         "bones": bones,
+        "vrm": vrm,
     }
 
 
@@ -236,7 +358,7 @@ def motion_duration(keyframes: list[dict[str, Any]]) -> float:
 
 
 def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
-    """Validate and atomically save an aural-motion v1 JSON file."""
+    """Validate and atomically save an aural-motion v1 or v2 JSON file."""
     destination = Path(path).expanduser()
     if not isinstance(keyframes, list) or not keyframes:
         raise CharacterMotionError("Motion recording must contain at least one keyframe")
@@ -248,9 +370,10 @@ def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
     times = [frame["time"] for frame in normalized]
     if len(times) != len(set(times)):
         raise CharacterMotionError("Motion keyframe times must be unique")
+    contains_vrm = any("vrm" in frame for frame in normalized)
     payload = {
         "format": MOTION_FORMAT,
-        "version": MOTION_VERSION,
+        "version": MOTION_VERSION if contains_vrm else LEGACY_MOTION_VERSION,
         "keyframes": normalized,
     }
     encoded = (

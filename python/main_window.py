@@ -1972,6 +1972,8 @@ class MainWindow(QMainWindow):
 
         temporary_path: Path | None = None
         asset = None
+        character_asset = None
+        character_asset_created = False
         motion_clip_id: str | None = None
         character_clip_id: str | None = None
         try:
@@ -2012,14 +2014,37 @@ class MainWindow(QMainWindow):
                         1 for track in model.tracks if track.kind == "overlay"
                     )
                     overlay_tracks = [model.add_track(f"Overlay {count}", "overlay")]
-                character = model.add_clip(
-                    overlay_tracks[0].id,
-                    "character",
-                    "2D Character",
-                    duration,
-                    start=start,
-                    script_line_id=BUILTIN_2D_CHARACTER_ID,
+
+                loaded_vrm_path = (
+                    self.preview_3d_widget.model_path
+                    if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None
+                    else None
                 )
+                if loaded_vrm_path is not None and loaded_vrm_path.is_file():
+                    existing_asset_ids = {item.id for item in self._project.assets}
+                    character_asset = self._project.add_asset(
+                        loaded_vrm_path,
+                        "character",
+                        copy_into_project=False,
+                    )
+                    character_asset_created = character_asset.id not in existing_asset_ids
+                    character = model.add_clip(
+                        overlay_tracks[0].id,
+                        "character",
+                        character_asset.name,
+                        duration,
+                        start=start,
+                        asset_id=character_asset.id,
+                    )
+                else:
+                    character = model.add_clip(
+                        overlay_tracks[0].id,
+                        "character",
+                        "2D Character",
+                        duration,
+                        start=start,
+                        script_line_id=BUILTIN_2D_CHARACTER_ID,
+                    )
                 character_clip_id = character.id
 
             motion_tracks = [
@@ -2063,6 +2088,14 @@ class MainWindow(QMainWindow):
             if asset is not None:
                 try:
                     self._project.remove_asset(asset.id, delete_managed_file=True)
+                except (OSError, ProjectError):
+                    pass
+            if character_asset is not None and character_asset_created:
+                try:
+                    self._project.remove_asset(
+                        character_asset.id,
+                        delete_managed_file=False,
+                    )
                 except (OSError, ProjectError):
                     pass
             self.timeline_panel.refresh()

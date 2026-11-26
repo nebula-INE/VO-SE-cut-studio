@@ -32,12 +32,22 @@ and finger bones. VMC root (Hips) translation is applied without replacing
 the model's own child-bone lengths; head-only sources continue to work without
 a root-bone stream. Unknown bone/expression names are ignored safely.
 
-## Current scope
+## Motion capture and timeline playback
 
-This milestone is a live 3D preview. VRM timeline motion recording/playback,
-offline VRM frame rendering, and VRM MP4 export are not included yet; those
-will be integrated through a shared offscreen renderer in a later milestone.
-The existing built-in 2D renderer and its export path remain unchanged.
+VMC/OSC and WebSocket head, humanoid bone, and expression samples can be
+recorded at 30 fps into `.motion.json`. Files containing VRM transforms use
+motion format v2; existing v1 2D recordings remain readable and continue to be
+saved as v1 when no VRM transforms are present.
+
+The motion track interpolates positions linearly and rotations with quaternion
+SLERP. At playback time it drives the active VRM character clip. Hips position
+is retained, while child-bone rest positions are kept from the model so motion
+does not overwrite each avatar's bone lengths. When playback leaves a motion
+clip, the VRM returns to its rest pose or live VMC feed.
+
+Offline VRM frame rendering and VRM MP4 export are not included yet; those
+require a shared offscreen renderer and their own cross-platform tests. The
+existing built-in 2D renderer and its export path remain unchanged.
 
 The viewer is served by a temporary HTTP server bound only to `127.0.0.1`.
 The selected VRM is exposed through a per-session random route. WebEngine local

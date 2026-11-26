@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main, feat/project-core-v1, feat/timeline-core-v1, feat/timeline-playback-v1, feat/timeline-audio-v1, feat/generated-audio-assets-v1, feat/timeline-audio-mix-controls-v1, feat/timeline-audio-render-v1, feat/timeline-audio-video-export-v1, feat/timeline-full-video-export-v1, feat/timeline-subtitle-burn-in-v1, feat/timeline-character-motion-export-v1, feat/mocap-motion-recording-v1 ]
+    branches: [ main, feat/project-core-v1, feat/timeline-core-v1, feat/timeline-playback-v1, feat/timeline-audio-v1, feat/generated-audio-assets-v1, feat/timeline-audio-mix-controls-v1, feat/timeline-audio-render-v1, feat/timeline-audio-video-export-v1, feat/timeline-full-video-export-v1, feat/timeline-subtitle-burn-in-v1, feat/timeline-character-motion-export-v1, feat/mocap-motion-recording-v1, feat/vrm-timeline-mp4-export-v1 ]
 
 jobs:
   python-tests:

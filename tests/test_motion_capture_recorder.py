@@ -44,6 +44,29 @@ def test_recorder_captures_head_expression_vowels_and_supported_bones():
     assert frames[-1]["time"] >= 0.5
 
 
+def test_recorder_captures_vrm_head_and_humanoid_poses():
+    now = [10.0]
+    recorder = MotionCaptureRecorder(clock=lambda: now[0])
+    recorder.start()
+    recorder.update_head_3d(0.1, 1.2, -0.2, 0.0, 0.0, 0.0, 2.0)
+    recorder.update_bone_3d("Hips", 0.3, 0.0, 0.0, 0.0, 0.0, 0.5, 0.8660254)
+    recorder.update_bone_3d("LeftIndexProximal", 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.9797959)
+    recorder.update_bone_3d("UnknownBone", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+
+    now[0] += 1.0 / 30.0
+    assert recorder.capture()
+    now[0] += 0.1
+    frames = recorder.stop()
+
+    vrm = frames[1]["vrm"]
+    assert vrm["head"]["position"] == pytest.approx((0.1, 1.2, -0.2))
+    assert vrm["head"]["rotation"] == pytest.approx((0.0, 0.0, 0.0, 1.0))
+    assert vrm["bones"]["hips"]["position"] == pytest.approx((0.3, 0.0, 0.0))
+    assert "position" not in vrm["bones"]["leftIndexProximal"]
+    assert vrm["bones"]["leftIndexProximal"]["rotation"][1] > 0.0
+    assert "unknown" not in vrm["bones"]
+
+
 def test_recorder_rate_limits_capture_and_elides_unchanged_snapshots():
     now = [1.0]
     recorder = MotionCaptureRecorder(clock=lambda: now[0])

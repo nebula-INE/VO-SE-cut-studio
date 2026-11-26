@@ -2002,8 +2002,36 @@ class MainWindow(QMainWindow):
                 and (track := model.get_track(clip.track_id)) is not None
                 and not track.muted and track.visible
             ]
+            overlapping_vrm_characters = []
+            for clip in overlapping_characters:
+                if clip.asset_id is None:
+                    continue
+                existing_character_asset = self._project.get_asset(clip.asset_id)
+                if existing_character_asset is None:
+                    continue
+                try:
+                    existing_character_path = self._project.resolve_asset(
+                        existing_character_asset
+                    )
+                except (OSError, ProjectError):
+                    continue
+                if existing_character_path.suffix.lower() == ".vrm":
+                    overlapping_vrm_characters.append(clip)
 
-            if not overlapping_characters:
+            loaded_vrm_path = (
+                self.preview_3d_widget.model_path
+                if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None
+                else None
+            )
+            active_vrm_model = (
+                loaded_vrm_path is not None and loaded_vrm_path.is_file()
+            )
+            # A pre-existing 2D character clip must not suppress the VRM clip:
+            # otherwise a saved VRM take has no model reference when reopened.
+            needs_vrm_character = active_vrm_model and not overlapping_vrm_characters
+            needs_2d_character = not active_vrm_model and not overlapping_characters
+
+            if needs_vrm_character or needs_2d_character:
                 overlay_tracks = [
                     track for track in model.tracks
                     if track.kind == "overlay"
@@ -2015,12 +2043,7 @@ class MainWindow(QMainWindow):
                     )
                     overlay_tracks = [model.add_track(f"Overlay {count}", "overlay")]
 
-                loaded_vrm_path = (
-                    self.preview_3d_widget.model_path
-                    if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None
-                    else None
-                )
-                if loaded_vrm_path is not None and loaded_vrm_path.is_file():
+                if active_vrm_model:
                     existing_asset_ids = {item.id for item in self._project.assets}
                     character_asset = self._project.add_asset(
                         loaded_vrm_path,

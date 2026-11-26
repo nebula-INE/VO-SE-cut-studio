@@ -3,6 +3,7 @@ import math
 
 import pytest
 
+import character_motion
 from character_motion import CharacterMotionError, load_motion_file, sample_motion, save_motion_file
 
 
@@ -78,9 +79,10 @@ def test_load_motion_file_rejects_invalid_documents(tmp_path, payload):
         load_motion_file(path)
 
 
-def test_motion_file_size_limit_is_enforced(tmp_path):
+def test_motion_file_size_limit_is_enforced(tmp_path, monkeypatch):
+    monkeypatch.setattr(character_motion, "MAX_MOTION_FILE_BYTES", 64)
     path = tmp_path / "large.motion.json"
-    path.write_text(" " * (10 * 1024 * 1024 + 1), encoding="utf-8")
+    path.write_text(" " * 65, encoding="utf-8")
     with pytest.raises(CharacterMotionError, match="too large"):
         load_motion_file(path)
 

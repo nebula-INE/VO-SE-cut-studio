@@ -39,6 +39,7 @@ from runtime_paths import find_runtime_file
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
+from timeline_track_selection import select_timeline_asset_track
 from timeline_model import TimelineError, TimelineModel
 from timeline_audio import TimelineAudioPlayback
 from timeline_audio_render import (
@@ -2317,41 +2318,12 @@ class MainWindow(QMainWindow):
         return 5.0
 
     def _select_timeline_asset_track(self, tracks, clip_kind: str):
-        """Ask which matching unlocked track should receive a new asset clip."""
-        if not tracks:
-            return None
-        if len(tracks) == 1:
-            return tracks[0]
-
-        kind_labels = {
-            "video": "動画",
-            "audio": "音声",
-            "image": "画像",
-            "character": "キャラクター",
-            "motion": "モーション",
-            "other": "その他",
-        }
-        labels = [
-            (
-                f"{index + 1}. {track.name} "
-                f"({len(self.timeline_panel.model.clips_for_track(track.id))} 件)"
-            )
-            for index, track in enumerate(tracks)
-        ]
-        selected, accepted = QInputDialog.getItem(
+        return select_timeline_asset_track(
             self,
-            "配置先トラック",
-            f"{kind_labels.get(clip_kind, clip_kind)}クリップの配置先:",
-            labels,
-            0,
-            False,
+            self.timeline_panel.model,
+            tracks,
+            clip_kind,
         )
-        if not accepted:
-            return None
-        try:
-            return tracks[labels.index(selected)]
-        except ValueError:
-            return None
 
     def add_timeline_clip_from_assets(self) -> None:
         available = [

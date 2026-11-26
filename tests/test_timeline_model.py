@@ -342,3 +342,75 @@ def test_split_audio_clip_keeps_fades_on_outer_edges_and_volume_on_both_parts():
     assert right.fade_in == 0.0
     assert right.fade_out == 2.0
     assert left.volume == right.volume == 0.7
+
+
+
+def test_character_transform_round_trips_and_survives_splitting():
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    clip = model.add_clip(
+        overlay.id, "character", "actor", 4.0, asset_id="actor.vrm",
+    )
+    model.set_character_transform(
+        clip.id, position_x=0.25, position_y=0.7, scale=1.35, rotation_deg=-22.5
+    )
+
+    restored = TimelineModel.from_dict(model.to_dict()).get_clip(clip.id)
+    assert restored is not None
+    assert restored.position_x == pytest.approx(0.25)
+    assert restored.position_y == pytest.approx(0.7)
+    assert restored.scale == pytest.approx(1.35)
+    assert restored.rotation_deg == pytest.approx(-22.5)
+
+    left, right = model.split_clip(clip.id, 2.0)
+    assert left.position_x == right.position_x == pytest.approx(0.25)
+    assert left.position_y == right.position_y == pytest.approx(0.7)
+    assert left.scale == right.scale == pytest.approx(1.35)
+    assert left.rotation_deg == right.rotation_deg == pytest.approx(-22.5)
+
+
+def test_legacy_character_clip_defaults_to_automatic_stage_transform():
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    clip = model.add_clip(overlay.id, "character", "legacy actor", 1.0, asset_id="actor.vrm")
+    payload = model.to_dict()
+    for key in ("position_x", "position_y", "scale", "rotation_deg"):
+        payload["clips"][0].pop(key)
+
+    restored = TimelineModel.from_dict(payload).get_clip(clip.id)
+    assert restored is not None
+    assert restored.position_x is None
+    assert restored.position_y is None
+    assert restored.scale == 1.0
+    assert restored.rotation_deg == 0.0
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ({"position_x": 0.2, "position_y": None}, "both be set or both be automatic"),
+        ({"position_x": -0.01, "position_y": 0.5}, "position_x must be between"),
+        ({"position_x": 0.5, "position_y": 1.01}, "position_y must be between"),
+        ({"scale": 0.05}, "scale must be between"),
+        ({"scale": 2.6}, "scale must be between"),
+        ({"rotation_deg": 181.0}, "rotation_deg must be between"),
+    ],
+)
+def test_character_transform_rejects_invalid_values(settings, message):
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    clip = model.add_clip(overlay.id, "character", "actor", 1.0, asset_id="actor.vrm")
+
+    with pytest.raises(TimelineError, match=message):
+        model.set_character_transform(clip.id, **settings)
+
+
+def test_character_transform_cannot_be_applied_to_non_character_clip():
+    model = TimelineModel.create_default()
+    video_track = next(track for track in model.tracks if track.kind == "video")
+    clip = model.add_clip(video_track.id, "video", "scene", 1.0, asset_id="scene.mp4")
+
+    with pytest.raises(TimelineError, match="require a character clip"):
+        model.set_character_transform(
+            clip.id, position_x=0.5, position_y=0.5, scale=1.0, rotation_deg=0.0
+        )

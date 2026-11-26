@@ -530,7 +530,8 @@ def render_timeline_video(
         raise VideoRenderError(f"出力フォルダーを作成できません: {exc}") from exc
 
     character_layouts = _character_lane_assignments(
-        clip for clip, _source in resolved if clip.kind == "character"
+        clip for clip, _source in resolved
+        if clip.kind == "character" and clip.position_x is None
     )
 
     work_dir = Path(tempfile.mkdtemp(prefix="aural-timeline-render-"))
@@ -614,22 +615,37 @@ def render_timeline_video(
         for index, (clip, _source) in enumerate(resolved):
             source_label = f"clip{index}"
             if clip.kind == "character":
-                filters.append(
-                    f"[{index}:v:0]trim=duration={_filter_number(clip.duration)},"
-                    f"setpts=PTS-STARTPTS+{_filter_number(clip.start)}/TB,"
-                    f"scale=-1:{max(2, int(height * 0.4) // 2 * 2)},"
-                    f"format=rgba[{source_label}]"
+                target_height = max(
+                    2, int(height * 0.4 * clip.scale) // 2 * 2
                 )
+                character_filters = [
+                    f"[{index}:v:0]trim=duration={_filter_number(clip.duration)}",
+                    f"setpts=PTS-STARTPTS+{_filter_number(clip.start)}/TB",
+                    f"scale=-1:{target_height}",
+                ]
+                if abs(clip.rotation_deg) > 1e-9:
+                    character_filters.append(
+                        f"rotate={_filter_number(clip.rotation_deg)}*PI/180:"
+                        "ow=rotw(iw):oh=roth(ih):c=none"
+                    )
+                character_filters.append(f"format=rgba[{source_label}]")
+                filters.append(",".join(character_filters))
+
                 margin = max(8, int(height * 0.03))
                 lane, lane_count = character_layouts.get(clip.id, (0, 1))
-                if lane_count > 1:
-                    # Separate overlapping characters across the stage. A lone
-                    # character keeps the historical lower-left placement.
-                    x_position = (
-                        f"(W-w)*{_filter_number((lane + 1) / (lane_count + 1))}"
-                    )
+                if clip.position_x is not None and clip.position_y is not None:
+                    x_position = f"(W-w)*{_filter_number(clip.position_x)}"
+                    y_position = f"(H-h)*{_filter_number(clip.position_y)}"
                 else:
-                    x_position = str(margin)
+                    if lane_count > 1:
+                        # Separate overlapping characters across the stage. A lone
+                        # character keeps the historical lower-left placement.
+                        x_position = (
+                            f"(W-w)*{_filter_number((lane + 1) / (lane_count + 1))}"
+                        )
+                    else:
+                        x_position = str(margin)
+                    y_position = f"H-h-{margin}"
                 next_label = f"base{index + 1}"
                 enable = (
                     f"gte(t,{_filter_number(clip.start)})*"
@@ -637,7 +653,7 @@ def render_timeline_video(
                 )
                 filters.append(
                     f"[{previous_label}][{source_label}]"
-                    f"overlay=x={x_position}:y=H-h-{margin}:eof_action=pass:"
+                    f"overlay=x={x_position}:y={y_position}:eof_action=pass:"
                     f"repeatlast=0:shortest=0:enable='{enable}'[{next_label}]"
                 )
                 previous_label = next_label

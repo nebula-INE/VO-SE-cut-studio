@@ -648,3 +648,48 @@ def test_multiple_vrm_characters_render_side_by_side_with_independent_motion(
     assert "overlay=x=(W-w)*0.666666667" in graph
     assert graph.count("format=rgba") >= 3
     assert output.read_bytes() == b"two actor mp4"
+
+
+
+def test_character_stage_transform_controls_position_scale_and_rotation(
+    tmp_path, monkeypatch
+):
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    actor = model.add_clip(
+        overlay.id, "character", "positioned actor", 0.1, asset_id="actor.vrm"
+    )
+    model.set_character_transform(
+        actor.id, position_x=0.25, position_y=0.6, scale=1.5, rotation_deg=30.0
+    )
+    vrm_path = tmp_path / "actor.vrm"
+    vrm_path.write_bytes(b"VRM fixture")
+    output = tmp_path / "positioned.mp4"
+    executable = tmp_path / "ffmpeg"
+    executable.write_bytes(b"fake ffmpeg")
+
+    monkeypatch.setattr(
+        timeline_video_render, "find_ffmpeg_executable", lambda *_args: str(executable)
+    )
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"positioned mp4")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(timeline_video_render.subprocess, "run", fake_run)
+    render_timeline_video(
+        model,
+        lambda _clip: vrm_path,
+        output,
+        still_image_canvas=(1280, 720),
+        ffmpeg_path=executable,
+        vrm_frame_renderer=lambda *_args: _transparent_png_bytes(),
+    )
+
+    graph = captured["command"][captured["command"].index("-filter_complex") + 1]
+    assert "scale=-1:432" in graph
+    assert "rotate=30*PI/180:ow=rotw(iw):oh=roth(ih):c=none" in graph
+    assert "overlay=x=(W-w)*0.25:y=(H-h)*0.6" in graph
+    assert output.read_bytes() == b"positioned mp4"

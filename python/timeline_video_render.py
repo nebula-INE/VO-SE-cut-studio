@@ -284,7 +284,7 @@ def _render_vrm_sequence(
             raise VideoRenderError(
                 f"VRMキャラクター「{clip.name}」のフレーム {frame_index} を描画できません: {exc}"
             ) from exc
-        if not isinstance(image, bytes) or not image.startswith(b"\x89PNG\r\n\x1a\n")
+        if not isinstance(image, bytes) or not image.startswith(b"\x89PNG\r\n\x1a\n"):
             raise VideoRenderError(
                 f"VRMキャラクター「{clip.name}」のフレーム {frame_index} が有効なPNGではありません"
             )

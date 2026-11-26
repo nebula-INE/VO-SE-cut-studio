@@ -43,6 +43,8 @@ let headBasePosition = null;
 let hipsBasePosition = null;
 let previousExpressions = new Set();
 let modelLoadGeneration = 0;
+let baseBoneTransforms = new Map();
+let previousBones = new Set();
 
 function setStatus(message) {
   document.title = 'AXRAL_VRM_STATUS:' + message;
@@ -65,6 +67,8 @@ function disposeCurrentModel() {
   currentVrm = null;
   headBasePosition = null;
   hipsBasePosition = null;
+  baseBoneTransforms.clear();
+  previousBones.clear();
   previousExpressions.clear();
 }
 
@@ -120,6 +124,32 @@ async function loadModel(url) {
     const hips = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('hips');
     headBasePosition = head ? head.position.clone() : null;
     hipsBasePosition = hips ? hips.position.clone() : null;
+    for (const name of [
+      'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
+      'leftShoulder', 'leftUpperArm', 'leftLowerArm', 'leftHand',
+      'rightShoulder', 'rightUpperArm', 'rightLowerArm', 'rightHand',
+      'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'leftToes',
+      'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'rightToes',
+      'leftEye', 'rightEye', 'jaw',
+      'leftThumbMetacarpal', 'leftThumbProximal', 'leftThumbDistal',
+      'leftIndexProximal', 'leftIndexIntermediate', 'leftIndexDistal',
+      'leftMiddleProximal', 'leftMiddleIntermediate', 'leftMiddleDistal',
+      'leftRingProximal', 'leftRingIntermediate', 'leftRingDistal',
+      'leftLittleProximal', 'leftLittleIntermediate', 'leftLittleDistal',
+      'rightThumbMetacarpal', 'rightThumbProximal', 'rightThumbDistal',
+      'rightIndexProximal', 'rightIndexIntermediate', 'rightIndexDistal',
+      'rightMiddleProximal', 'rightMiddleIntermediate', 'rightMiddleDistal',
+      'rightRingProximal', 'rightRingIntermediate', 'rightRingDistal',
+      'rightLittleProximal', 'rightLittleIntermediate', 'rightLittleDistal',
+    ]) {
+      const node = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode(name);
+      if (node) {
+        baseBoneTransforms.set(name, {
+          quaternion: node.quaternion.clone(),
+          position: node.position.clone(),
+        });
+      }
+    }
     fitCamera(vrm);
     setStatus('読み込み完了: ' + (vrm.meta?.name || 'VRMモデル'));
   } catch (error) {
@@ -131,10 +161,28 @@ async function loadModel(url) {
 
 function applyMocapState(state) {
   if (!currentVrm || !state || typeof state !== 'object') return;
+
+  // Restore bones touched by the previous frame before applying the new state.
+  // This also resets a recorded pose cleanly when the playhead leaves a motion clip.
+  for (const name of previousBones) {
+    const node = currentVrm.humanoid && currentVrm.humanoid.getNormalizedBoneNode(name);
+    const base = baseBoneTransforms.get(name);
+    if (!node || !base) continue;
+    node.quaternion.copy(base.quaternion);
+    node.position.copy(base.position);
+  }
+  previousBones.clear();
+
   const bones = state.bones || {};
   for (const [name, transform] of Object.entries(bones)) {
     const node = currentVrm.humanoid && currentVrm.humanoid.getNormalizedBoneNode(name);
     if (!node || !transform) continue;
+    const base = baseBoneTransforms.get(name);
+    if (base) {
+      node.quaternion.copy(base.quaternion);
+      node.position.copy(base.position);
+    }
+    previousBones.add(name);
     const rotation = transform.rotation;
     if (Array.isArray(rotation) && rotation.length === 4) {
       const [x, y, z, w] = rotation;

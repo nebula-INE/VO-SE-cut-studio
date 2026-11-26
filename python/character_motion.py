@@ -15,7 +15,7 @@ from typing import Any
 MOTION_FORMAT = "aural-motion"
 MOTION_VERSION = 2
 LEGACY_MOTION_VERSION = 1
-MAX_MOTION_FILE_BYTES = 10 * 1024 * 1024
+MAX_MOTION_FILE_BYTES = 128 * 1024 * 1024
 SUPPORTED_BONES = frozenset({
     "LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm",
 })

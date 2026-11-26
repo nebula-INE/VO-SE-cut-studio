@@ -32,6 +32,22 @@ and finger bones. VMC root (Hips) translation is applied without replacing
 the model's own child-bone lengths; head-only sources continue to work without
 a root-bone stream. Unknown bone/expression names are ignored safely.
 
+## Recording and timeline playback
+
+Live motion capture recordings now write `aural-motion` version 2 when 3D data
+is present. Version 2 stores the full head transform, VMC humanoid bone
+positions/rotations, expressions, vowels, and existing 2D-compatible fields.
+Version 1 files remain readable and retain their original 2D four-arm-bone
+schema and 10 MiB limit; VRM version 2 files have a 64 MiB limit.
+
+Place a VRM character asset on an overlay track and the corresponding motion
+clip on a visible motion track. When the playhead is inside both clips, the
+sampled quaternion/position and expression values are interpolated and applied
+to the loaded VRM. During timeline playback this recorded pose takes priority
+over live mocap; when no motion clip is active, live VMC/WebSocket input resumes.
+The current milestone is still a live preview and timeline pose player; offline
+VRM frame rendering and MP4 export remain separate work.
+
 ## Current scope
 
 This milestone is a live 3D preview. VRM timeline motion recording/playback,

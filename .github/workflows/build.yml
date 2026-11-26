@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, feat/vrm-character-preview-v1 ]
   pull_request:
-    branches: [ main, feat/vrm-character-preview-v1, feat/vrm-timeline-mp4-export-v1, feat/vrm-multi-character-export-v1 ]
+    branches: [ main, feat/vrm-character-preview-v1, feat/vrm-timeline-mp4-export-v1, feat/vrm-multi-character-export-v1 , feat/timeline-asset-track-selection-v1 ]
 
 jobs:
   build-windows:

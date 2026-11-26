@@ -56,6 +56,41 @@ def _validate_audio_properties(
         raise TimelineError("Clip fade duration cannot exceed clip duration")
 
 
+def _validate_character_transform(
+    kind: str,
+    position_x: Any,
+    position_y: Any,
+    scale: Any,
+    rotation_deg: Any,
+) -> tuple[float | None, float | None, float, float]:
+    """Validate clip-level visual transforms while keeping legacy defaults."""
+    if (position_x is None) != (position_y is None):
+        raise TimelineError("Character position_x and position_y must both be set or both be automatic")
+
+    normalized_x = None if position_x is None else _number(position_x, "character position_x")
+    normalized_y = None if position_y is None else _number(position_y, "character position_y")
+    normalized_scale = _number(scale, "character scale")
+    normalized_rotation = _number(rotation_deg, "character rotation_deg")
+
+    if normalized_x is not None and not 0.0 <= normalized_x <= 1.0:
+        raise TimelineError("Character position_x must be between 0 and 1")
+    if normalized_y is not None and not 0.0 <= normalized_y <= 1.0:
+        raise TimelineError("Character position_y must be between 0 and 1")
+    if not 0.1 <= normalized_scale <= 2.5:
+        raise TimelineError("Character scale must be between 0.1 and 2.5")
+    if not -180.0 <= normalized_rotation <= 180.0:
+        raise TimelineError("Character rotation_deg must be between -180 and 180")
+    if kind != "character" and (
+        normalized_x is not None
+        or normalized_y is not None
+        or normalized_scale != 1.0
+        or normalized_rotation != 0.0
+    ):
+        raise TimelineError("Visual transforms are only supported on character clips")
+
+    return normalized_x, normalized_y, normalized_scale, normalized_rotation
+
+
 @dataclass
 class TimelineTrack:
     id: str
@@ -112,6 +147,11 @@ class TimelineClip:
     volume: float = 1.0
     fade_in: float = 0.0
     fade_out: float = 0.0
+    # Character stage position is normalized to [0, 1]; None keeps auto layout.
+    position_x: float | None = None
+    position_y: float | None = None
+    scale: float = 1.0
+    rotation_deg: float = 0.0
 
     @property
     def end(self) -> float:
@@ -154,6 +194,16 @@ class TimelineClip:
                 volume=_number(data.get("volume", 1.0), "clip volume"),
                 fade_in=_number(data.get("fade_in", 0.0), "clip fade_in"),
                 fade_out=_number(data.get("fade_out", 0.0), "clip fade_out"),
+                position_x=(
+                    None if data.get("position_x") is None
+                    else _number(data.get("position_x"), "character position_x")
+                ),
+                position_y=(
+                    None if data.get("position_y") is None
+                    else _number(data.get("position_y"), "character position_y")
+                ),
+                scale=_number(data.get("scale", 1.0), "character scale"),
+                rotation_deg=_number(data.get("rotation_deg", 0.0), "character rotation_deg"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(exc, TimelineError):
@@ -176,6 +226,14 @@ class TimelineClip:
             clip.volume != 1.0 or clip.fade_in != 0.0 or clip.fade_out != 0.0
         ):
             raise TimelineError("Audio properties are only supported on audio and voice clips")
+        (
+            clip.position_x,
+            clip.position_y,
+            clip.scale,
+            clip.rotation_deg,
+        ) = _validate_character_transform(
+            clip.kind, clip.position_x, clip.position_y, clip.scale, clip.rotation_deg
+        )
         return clip
 
     def to_dict(self) -> dict[str, Any]:
@@ -260,6 +318,9 @@ class TimelineModel:
                 clip.volume != 1.0 or clip.fade_in != 0.0 or clip.fade_out != 0.0
             ):
                 raise TimelineError("Audio properties are only supported on audio and voice clips")
+            _validate_character_transform(
+                clip.kind, clip.position_x, clip.position_y, clip.scale, clip.rotation_deg
+            )
 
     @property
     def duration_sec(self) -> float:
@@ -326,6 +387,10 @@ class TimelineModel:
         volume: float = 1.0,
         fade_in: float = 0.0,
         fade_out: float = 0.0,
+        position_x: float | None = None,
+        position_y: float | None = None,
+        scale: float = 1.0,
+        rotation_deg: float = 0.0,
     ) -> TimelineClip:
         track = self.get_track(track_id)
         if track is None:
@@ -351,6 +416,12 @@ class TimelineModel:
             volume_value != 1.0 or fade_in_value != 0.0 or fade_out_value != 0.0
         ):
             raise TimelineError("Audio properties are only supported on audio and voice clips")
+        (
+            position_x_value,
+            position_y_value,
+            scale_value,
+            rotation_value,
+        ) = _validate_character_transform(kind, position_x, position_y, scale, rotation_deg)
         clip = TimelineClip(
             id=uuid.uuid4().hex,
             track_id=track_id,
@@ -364,6 +435,10 @@ class TimelineModel:
             volume=volume_value,
             fade_in=fade_in_value,
             fade_out=fade_out_value,
+            position_x=position_x_value,
+            position_y=position_y_value,
+            scale=scale_value,
+            rotation_deg=rotation_value,
         )
         self.clips.append(clip)
         return clip
@@ -484,6 +559,31 @@ class TimelineModel:
         clip.fade_out = new_fade_out
         return clip
 
+    def set_character_transform(
+        self,
+        clip_id: str,
+        *,
+        position_x: float | None = None,
+        position_y: float | None = None,
+        scale: float = 1.0,
+        rotation_deg: float = 0.0,
+    ) -> TimelineClip:
+        """Set normalized stage position, relative size, and rotation on a character."""
+        clip = self.get_clip(clip_id)
+        if clip is None:
+            raise TimelineError(f"Unknown timeline clip: {clip_id}")
+        if clip.kind != "character":
+            raise TimelineError("Visual transforms require a character clip")
+        (
+            clip.position_x,
+            clip.position_y,
+            clip.scale,
+            clip.rotation_deg,
+        ) = _validate_character_transform(
+            clip.kind, position_x, position_y, scale, rotation_deg
+        )
+        return clip
+
     def split_clip(self, clip_id: str, at_seconds: float) -> tuple[TimelineClip, TimelineClip]:
         clip = self.get_clip(clip_id)
         if clip is None:
@@ -506,6 +606,10 @@ class TimelineModel:
             volume=clip.volume,
             fade_in=0.0,
             fade_out=min(clip.fade_out, clip.duration - left_duration),
+            position_x=clip.position_x,
+            position_y=clip.position_y,
+            scale=clip.scale,
+            rotation_deg=clip.rotation_deg,
         )
         clip.duration = left_duration
         clip.fade_in = min(clip.fade_in, left_duration)

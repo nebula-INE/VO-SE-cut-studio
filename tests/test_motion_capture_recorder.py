@@ -137,3 +137,28 @@ def test_recorded_keyframes_can_be_saved_and_reloaded(tmp_path):
     assert len(loaded) >= 3
     assert loaded[1]["head"]["x"] == pytest.approx(0.1)
     assert loaded[-1]["time"] >= 0.35
+
+
+
+def test_vrm_recording_saves_v2_and_round_trips(tmp_path):
+    now = [50.0]
+    recorder = MotionCaptureRecorder(clock=lambda: now[0])
+    recorder.start()
+    recorder.update_head_3d(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    recorder.update_bone_3d("Hips", 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    recorder.update_bone_3d("LeftUpperArm", 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.8660254)
+    recorder.update_blend_shapes({"Blink_L": 0.7, "Blink_R": 0.4, "Joy": 0.8})
+
+    now[0] += 1.0 / 30.0
+    recorder.capture()
+    now[0] += 0.2
+    keyframes = recorder.stop()
+    path = save_motion_file(tmp_path / "vrm-take.motion.json", keyframes)
+    loaded = load_motion_file(path)
+
+    import json
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+    assert loaded[1]["vrm"]["head"]["position"] == pytest.approx((0.0, 1.0, 0.0))
+    assert loaded[1]["vrm"]["bones"]["hips"]["position"] == pytest.approx((0.1, 0.0, 0.0))
+    assert loaded[1]["blend_shapes"]["Blink_L"] == pytest.approx(0.7)
+    assert loaded[1]["blend_shapes"]["Blink_R"] == pytest.approx(0.4)

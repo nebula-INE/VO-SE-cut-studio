@@ -73,3 +73,41 @@ def test_vrm_child_bone_keeps_model_rest_position() -> None:
 
     assert target._bones["leftUpperArm"] == {"rotation": (0.0, 0.0, 0.0, 1.0)}
     assert "position" not in target._bones["leftUpperArm"]
+
+def test_timeline_motion_pose_overrides_live_pose_and_can_be_cleared() -> None:
+    target = SimpleNamespace(_timeline_state=None)
+    pose = {
+        "bones": {
+            "head": {
+                "position": (0.1, 0.2, 0.3),
+                "rotation": (0.0, 0.0, 0.0, 1.0),
+            },
+            "hips": {
+                "position": (0.4, 0.0, 0.0),
+                "rotation": (0.0, 0.0, 0.0, 1.0),
+            },
+            "not-a-vrm-bone": {"rotation": (0.0, 0.0, 0.0, 1.0)},
+        },
+        "expressions": {"happy": 0.7, "unknown": 0.4},
+    }
+
+    VRMViewerWidget.set_timeline_motion_state(target, pose)
+
+    assert set(target._timeline_state["bones"]) == {"head", "hips"}
+    assert target._timeline_state["bones"]["hips"]["position"] == (0.4, 0.0, 0.0)
+    assert target._timeline_state["expressions"] == {"happy": 0.7}
+
+    VRMViewerWidget.clear_timeline_motion_state(target)
+    assert target._timeline_state is None
+
+
+def test_timeline_motion_pose_rejects_invalid_quaternion() -> None:
+    target = SimpleNamespace(_timeline_state=None)
+    VRMViewerWidget.set_timeline_motion_state(target, {
+        "bones": {
+            "head": {"position": (0.0, 0.0, 0.0), "rotation": (0.0, 0.0, 0.0, 0.0)}
+        },
+        "expressions": {},
+    })
+    assert target._timeline_state["bones"] == {}
+

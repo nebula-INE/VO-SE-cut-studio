@@ -12,9 +12,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from vrm_mocap import SUPPORTED_VRM_BONES
+
 MOTION_FORMAT = "aural-motion"
 MOTION_VERSION = 1
-MAX_MOTION_FILE_BYTES = 10 * 1024 * 1024
+MOTION_VERSION_VRM = 2
+MAX_MOTION_FILE_BYTES = 64 * 1024 * 1024
 SUPPORTED_BONES = frozenset({
     "LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm",
 })
@@ -65,7 +68,15 @@ def _quaternion(value: Any, label: str) -> tuple[float, float, float, float]:
     return tuple(item / length for item in components)  # type: ignore[return-value]
 
 
-def _normalize_keyframe(raw: Any, index: int) -> dict[str, Any]:
+def _vector3(value: Any, label: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise CharacterMotionError(f"{label} must be [x, y, z]")
+    return tuple(_finite_number(item, label) for item in value)  # type: ignore[return-value]
+
+
+def _normalize_keyframe(
+    raw: Any, index: int, *, allow_vrm_fields: bool = False
+) -> dict[str, Any]:
     label = f"keyframes[{index}]"
     if not isinstance(raw, dict):
         raise CharacterMotionError(f"{label} must be an object")
@@ -103,8 +114,43 @@ def _normalize_keyframe(raw: Any, index: int) -> dict[str, Any]:
         normalized_bones[name] = _quaternion(value, f"{label}.bones.{name}")
     if normalized_bones:
         result["bones"] = normalized_bones
-    return result
 
+    if not allow_vrm_fields and ("head_3d" in raw or "vrm_bones" in raw):
+        raise CharacterMotionError(f"{label} contains VRM data but the file is version 1")
+
+    if allow_vrm_fields and "head_3d" in raw:
+        head_3d = raw["head_3d"]
+        if not isinstance(head_3d, dict):
+            raise CharacterMotionError(f"{label}.head_3d must be an object")
+        result["head_3d"] = {
+            "position": _vector3(head_3d.get("position"), f"{label}.head_3d.position"),
+            "rotation": _quaternion(head_3d.get("rotation"), f"{label}.head_3d.rotation"),
+        }
+
+    if allow_vrm_fields and "vrm_bones" in raw:
+        vrm_bones = raw["vrm_bones"]
+        if not isinstance(vrm_bones, dict):
+            raise CharacterMotionError(f"{label}.vrm_bones must be an object")
+        normalized_vrm_bones: dict[str, dict[str, Any]] = {}
+        for name, transform in vrm_bones.items():
+            if name not in SUPPORTED_VRM_BONES or name == "Head":
+                raise CharacterMotionError(f"Unsupported VRM bone name: {name}")
+            if not isinstance(transform, dict):
+                raise CharacterMotionError(f"{label}.vrm_bones.{name} must be an object")
+            normalized_transform: dict[str, Any] = {
+                "rotation": _quaternion(
+                    transform.get("rotation"), f"{label}.vrm_bones.{name}.rotation"
+                )
+            }
+            if "position" in transform:
+                normalized_transform["position"] = _vector3(
+                    transform["position"], f"{label}.vrm_bones.{name}.position"
+                )
+            normalized_vrm_bones[name] = normalized_transform
+        if normalized_vrm_bones:
+            result["vrm_bones"] = normalized_vrm_bones
+
+    return result
 
 def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
     """Load and validate an aural-motion v1 JSON file."""
@@ -123,13 +169,19 @@ def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
 
     if not isinstance(payload, dict) or payload.get("format") != MOTION_FORMAT:
         raise CharacterMotionError(f"Motion file must have format={MOTION_FORMAT!r}")
-    if type(payload.get("version")) is not int or payload["version"] != MOTION_VERSION:
-        raise CharacterMotionError(f"Unsupported motion format version: {payload.get('version')!r}")
+    version = payload.get("version")
+    if type(version) is not int or version not in (MOTION_VERSION, MOTION_VERSION_VRM):
+        raise CharacterMotionError(f"Unsupported motion format version: {version!r}")
     frames = payload.get("keyframes")
     if not isinstance(frames, list) or not frames:
         raise CharacterMotionError("Motion file must contain at least one keyframe")
 
-    normalized = [_normalize_keyframe(frame, index) for index, frame in enumerate(frames)]
+    normalized = [
+        _normalize_keyframe(
+            frame, index, allow_vrm_fields=(version == MOTION_VERSION_VRM)
+        )
+        for index, frame in enumerate(frames)
+    ]
     normalized.sort(key=lambda frame: frame["time"])
     times = [frame["time"] for frame in normalized]
     if len(times) != len(set(times)):
@@ -162,6 +214,26 @@ def _slerp(
     return tuple(left_weight * a + right_weight * b for a, b in zip(left, right))  # type: ignore[return-value]
 
 
+def _interpolate_transform(
+    left: dict[str, Any], right: dict[str, Any], amount: float
+) -> dict[str, Any]:
+    left_rotation = left["rotation"]
+    right_rotation = right.get("rotation", left_rotation)
+    result: dict[str, Any] = {
+        "rotation": _slerp(left_rotation, right_rotation, amount)
+    }
+    left_position = left.get("position")
+    right_position = right.get("position", left_position)
+    if left_position is not None or right_position is not None:
+        left_position = left_position or right_position
+        right_position = right_position or left_position
+        result["position"] = tuple(
+            _lerp(float(a), float(b), amount)
+            for a, b in zip(left_position, right_position)
+        )
+    return result
+
+
 def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str, Any]:
     """Interpolate one animation state at a source-relative timestamp."""
     if not keyframes:
@@ -171,6 +243,7 @@ def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str,
             "blend_shapes": {},
             "vowels": {},
             "bones": {},
+            "vrm_bones": {},
         }
     timestamp = max(0.0, _finite_number(time_sec, "motion sample time"))
     right_index = next(
@@ -221,14 +294,36 @@ def sample_motion(keyframes: list[dict[str, Any]], time_sec: float) -> dict[str,
         else:
             bones[name] = _slerp(left_bones[name], right_bones[name], amount)
 
+    left_vrm_bones = left.get("vrm_bones", {})
+    right_vrm_bones = right.get("vrm_bones", {})
+    vrm_bones = {}
+    for name in set(left_vrm_bones) | set(right_vrm_bones):
+        if name not in left_vrm_bones:
+            vrm_bones[name] = right_vrm_bones[name]
+        elif name not in right_vrm_bones:
+            vrm_bones[name] = left_vrm_bones[name]
+        else:
+            vrm_bones[name] = _interpolate_transform(
+                left_vrm_bones[name], right_vrm_bones[name], amount
+            )
+
+    left_head_3d = left.get("head_3d")
+    right_head_3d = right.get("head_3d", left_head_3d)
+    head_3d = None
+    if left_head_3d is not None or right_head_3d is not None:
+        left_head_3d = left_head_3d or right_head_3d
+        right_head_3d = right_head_3d or left_head_3d
+        head_3d = _interpolate_transform(left_head_3d, right_head_3d, amount)
+
     return {
         "mouth_openness": max(0.0, min(1.0, mouth)),
         "head": head,
+        "head_3d": head_3d,
         "blend_shapes": interpolate_weights("blend_shapes"),
         "vowels": interpolate_weights("vowels"),
         "bones": bones,
+        "vrm_bones": vrm_bones,
     }
-
 
 def motion_duration(keyframes: list[dict[str, Any]]) -> float:
     return float(keyframes[-1]["time"]) if keyframes else 0.0
@@ -236,12 +331,19 @@ def motion_duration(keyframes: list[dict[str, Any]]) -> float:
 
 
 def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
-    """Validate and atomically save an aural-motion v1 JSON file."""
+    """Validate and atomically save an aural-motion v1 or VRM v2 JSON file."""
     destination = Path(path).expanduser()
     if not isinstance(keyframes, list) or not keyframes:
         raise CharacterMotionError("Motion recording must contain at least one keyframe")
+    has_vrm_data = any(
+        isinstance(frame, dict) and ("head_3d" in frame or "vrm_bones" in frame)
+        for frame in keyframes
+    )
+    version = MOTION_VERSION_VRM if has_vrm_data else MOTION_VERSION
     normalized = [
-        _normalize_keyframe(frame, index)
+        _normalize_keyframe(
+            frame, index, allow_vrm_fields=(version == MOTION_VERSION_VRM)
+        )
         for index, frame in enumerate(keyframes)
     ]
     normalized.sort(key=lambda frame: frame["time"])
@@ -250,7 +352,7 @@ def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
         raise CharacterMotionError("Motion keyframe times must be unique")
     payload = {
         "format": MOTION_FORMAT,
-        "version": MOTION_VERSION,
+        "version": version,
         "keyframes": normalized,
     }
     encoded = (

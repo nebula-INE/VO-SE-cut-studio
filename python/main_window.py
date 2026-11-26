@@ -300,6 +300,7 @@ class _TimelineFullVideoExportTask(QRunnable):
         output_path: str,
         ffmpeg_path: str,
         subtitle_texts: dict[str, str] | None = None,
+        vrm_frame_renderer=None,
     ) -> None:
         super().__init__()
         self.timeline_payload = timeline_payload
@@ -307,12 +308,17 @@ class _TimelineFullVideoExportTask(QRunnable):
         self.output_path = output_path
         self.ffmpeg_path = ffmpeg_path
         self.subtitle_texts = dict(subtitle_texts or {})
+        self.vrm_frame_renderer = vrm_frame_renderer
         self.signals = _TimelineAudioRenderSignals()
 
     def run(self) -> None:
         try:
             model = TimelineModel.from_dict(self.timeline_payload)
-            visual_clips = timeline_video_clips(model, self.subtitle_texts)
+            visual_clips = timeline_video_clips(
+                model,
+                self.subtitle_texts,
+                allow_vrm=self.vrm_frame_renderer is not None,
+            )
             motion_clips = timeline_motion_clips(model)
             audio_clips = timeline_audio_clips(model)
             duration = max(
@@ -333,6 +339,7 @@ class _TimelineFullVideoExportTask(QRunnable):
                     subtitle_texts=self.subtitle_texts,
                     motion_clips=motion_clips,
                     voice_clips=audio_clips,
+                    vrm_frame_renderer=self.vrm_frame_renderer,
                 )
                 clipped_sample_count = 0
                 peak_level = 0.0
@@ -1651,7 +1658,9 @@ class MainWindow(QMainWindow):
                 for line in self.script_panel.model.to_dict().get("lines", [])
                 if line.get("line_id") and str(line.get("text", "")).strip()
             }
-            visual_clips = timeline_video_clips(snapshot, subtitle_texts)
+            visual_clips = timeline_video_clips(
+                snapshot, subtitle_texts, allow_vrm=_VRM_VIEWER_AVAILABLE
+            )
         except (TimelineError, VideoRenderError) as exc:
             QMessageBox.warning(self, "タイムラインMP4書き出し", str(exc))
             return
@@ -1669,7 +1678,9 @@ class MainWindow(QMainWindow):
         try:
             asset_paths: dict[str, str] = {}
             for clip in all_clips:
-                if clip.kind in {"text", "character"}:
+                if clip.kind == "text" or (
+                    clip.kind == "character" and clip.asset_id is None
+                ):
                     continue
                 asset = self._project.get_asset(clip.asset_id or "")
                 if asset is None:
@@ -1719,6 +1730,11 @@ class MainWindow(QMainWindow):
             str(output_path),
             ffmpeg_path,
             subtitle_texts,
+            vrm_frame_renderer=(
+                self.preview_3d_widget.render_frame_png
+                if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None
+                else None
+            ),
         )
         task.signals.finished.connect(self._on_timeline_full_video_export_finished)
         task.signals.failed.connect(self._on_timeline_full_video_export_failed)

@@ -64,7 +64,7 @@ from character_motion import (
     sample_motion,
     save_motion_file,
 )
-from vrm_mocap import normalize_blend_shapes, vmc_bone_to_vrm
+from vrm_mocap import motion_state_to_vrm_pose
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
     MAX_RECORDING_SECONDS,
@@ -1899,41 +1899,9 @@ class MainWindow(QMainWindow):
 
             local_time = motion_clip.source_in + timeline_seconds - motion_clip.start
             sampled = sample_motion(frames, local_time)
-            bones: dict[str, dict] = {}
-            expressions = normalize_blend_shapes({
-                **sampled.get("blend_shapes", {}),
-                **sampled.get("vowels", {}),
-            })
-
-            vrm_state = sampled.get("vrm", {})
-            vrm_head = vrm_state.get("head", {})
-            if vrm_head:
-                bones["head"] = dict(vrm_head)
-            for name, transform in vrm_state.get("bones", {}).items():
-                bones[name] = dict(transform)
-
-            # v1 files contain 2D head tilt and arm rotations only. Map those to
-            # equivalent VRM transforms so existing recordings remain usable.
-            if "head" not in bones:
-                head = sampled.get("head", {})
-                half_angle = math.radians(float(head.get("tilt_deg", 0.0))) * 0.5
-                bones["head"] = {
-                    "position": (
-                        float(head.get("x", 0.0)),
-                        float(head.get("y", 0.0)),
-                        0.0,
-                    ),
-                    "rotation": (0.0, 0.0, math.sin(half_angle), math.cos(half_angle)),
-                }
-            for name, rotation in sampled.get("bones", {}).items():
-                normalized_name = vmc_bone_to_vrm(name)
-                if normalized_name is not None:
-                    bones.setdefault(normalized_name, {"rotation": rotation})
-
-            self.preview_3d_widget.set_timeline_state({
-                "bones": bones,
-                "expressions": expressions,
-            })
+            self.preview_3d_widget.set_timeline_state(
+                motion_state_to_vrm_pose(sampled)
+            )
         except (OSError, ProjectError, CharacterMotionError, TypeError, ValueError) as exc:
             self.preview_3d_widget.set_timeline_state(None)
             self.statusBar().showMessage(f"VRMモーションを再生できません: {exc}", 6000)

@@ -25,7 +25,7 @@ Section: sound
 Priority: optional
 Architecture: $ARCH
 Maintainer: Axral
-Depends: ffmpeg, libgl1, libegl1, libgbm1, libdrm2, libnss3, libnspr4, libasound2, libcups2, libgtk-3-0, libatk1.0-0, libatk-bridge2.0-0, libatspi2.0-0, libxcb-cursor0, libxkbcommon0, libxkbcommon-x11-0, libxcb-xinerama0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-dri3-0, libx11-xcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxrandr2, libxkbfile1, libxtst6, libxshmfence1, libdbus-1-3, libpulse0
+Depends: ffmpeg, libgl1, libegl1, libgbm1, libdrm2, libnss3, libnspr4, libasound2t64 | libasound2, libcups2, libgtk-3-0, libatk1.0-0, libatk-bridge2.0-0, libatspi2.0-0, libxcb-cursor0, libxkbcommon0, libxkbcommon-x11-0, libxcb-xinerama0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-dri3-0, libx11-xcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxrandr2, libxkbfile1, libxtst6, libxshmfence1, libdbus-1-3, libpulse0
 Description: Axral Cut Studio desktop video and audio editing application
  Cross-platform script, audio, motion and video production editor.
 EOF

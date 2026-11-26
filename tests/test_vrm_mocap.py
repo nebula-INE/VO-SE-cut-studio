@@ -103,3 +103,29 @@ def test_canonical_vrm_blink_presets_survive_motion_normalization() -> None:
         "blinkRight": 0.4,
     })
     assert result == {"blinkLeft": 0.7, "blinkRight": 0.4}
+
+
+
+def test_recording_decision_keeps_existing_2d_clip_and_adds_vrm_reference():
+    from vrm_mocap import should_add_character_clip_for_recording
+
+    assert should_add_character_clip_for_recording(
+        has_any_character_clip=True,
+        has_vrm_character_clip=False,
+        has_loaded_vrm_model=True,
+    )
+    assert not should_add_character_clip_for_recording(
+        has_any_character_clip=True,
+        has_vrm_character_clip=True,
+        has_loaded_vrm_model=True,
+    )
+    assert not should_add_character_clip_for_recording(
+        has_any_character_clip=True,
+        has_vrm_character_clip=False,
+        has_loaded_vrm_model=False,
+    )
+    assert should_add_character_clip_for_recording(
+        has_any_character_clip=False,
+        has_vrm_character_clip=False,
+        has_loaded_vrm_model=False,
+    )

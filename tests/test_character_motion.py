@@ -62,7 +62,7 @@ def test_motion_weights_and_quaternions_are_interpolated(tmp_path):
 
 @pytest.mark.parametrize("payload", [
     {"format": "other", "version": 1, "keyframes": [{"time": 0}]},
-    {"format": "aural-motion", "version": 2, "keyframes": [{"time": 0}]},
+    {"format": "aural-motion", "version": 3, "keyframes": [{"time": 0}]},
     {"format": "aural-motion", "version": 1, "keyframes": []},
     {"format": "aural-motion", "version": 1, "keyframes": [{"time": -1}]},
     {"format": "aural-motion", "version": 1, "keyframes": [{"time": 0}, {"time": 0}]},
@@ -78,7 +78,14 @@ def test_load_motion_file_rejects_invalid_documents(tmp_path, payload):
 
 def test_motion_file_size_limit_is_enforced(tmp_path):
     path = tmp_path / "large.motion.json"
-    path.write_text(" " * (10 * 1024 * 1024 + 1), encoding="utf-8")
+    path.write_text(
+        json.dumps({
+            "format": "aural-motion",
+            "version": 1,
+            "keyframes": [{"time": 0.0, "ignored_large_metadata": "x" * (10 * 1024 * 1024 + 1)}],
+        }),
+        encoding="utf-8",
+    )
     with pytest.raises(CharacterMotionError, match="too large"):
         load_motion_file(path)
 
@@ -123,3 +130,76 @@ def test_save_motion_file_rejects_duplicate_times_and_invalid_values(tmp_path):
             tmp_path / "invalid.motion.json",
             [{"time": 0.0, "bones": {"LeftUpperArm": [0.0, 0.0, 0.0, 0.0]}}],
         )
+
+def test_vrm_motion_v2_round_trips_and_interpolates_full_body_pose(tmp_path):
+    from character_motion import save_motion_file
+
+    path = save_motion_file(
+        tmp_path / "vrm-take.motion.json",
+        [
+            {
+                "time": 0.0,
+                "head_3d": {
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0, 1.0],
+                },
+                "vrm_bones": {
+                    "Hips": {
+                        "position": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                    },
+                    "LeftUpperArm": {
+                        "position": [0.0, 0.1, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                    },
+                },
+            },
+            {
+                "time": 1.0,
+                "head_3d": {
+                    "position": [0.2, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)],
+                },
+                "vrm_bones": {
+                    "Hips": {
+                        "position": [0.0, 0.4, 0.0],
+                        "rotation": [0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4)],
+                    },
+                    "LeftUpperArm": {
+                        "position": [0.0, 0.1, 0.0],
+                        "rotation": [0.0, math.sin(math.pi / 4), 0.0, math.cos(math.pi / 4)],
+                    },
+                },
+                "blend_shapes": {"Joy": 0.8},
+            },
+        ],
+    )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    state = sample_motion(load_motion_file(path), 0.5)
+    assert state["head_3d"]["position"][0] == pytest.approx(0.1)
+    assert state["vrm_bones"]["Hips"]["position"][1] == pytest.approx(0.2)
+    rotation = state["head_3d"]["rotation"]
+    assert sum(value * value for value in rotation) == pytest.approx(1.0)
+    assert state["blend_shapes"]["Joy"] == pytest.approx(0.4)
+
+
+def test_motion_v1_rejects_vrm_fields_and_v2_rejects_unknown_bones(tmp_path):
+    from character_motion import save_motion_file
+
+    with pytest.raises(CharacterMotionError, match="version 1"):
+        save_motion_file(
+            tmp_path / "bad-v1.motion.json",
+            [{"time": 0.0, "head_3d": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1]}}],
+        )
+
+    path = tmp_path / "bad-v2.motion.json"
+    path.write_text(json.dumps({
+        "format": "aural-motion",
+        "version": 2,
+        "keyframes": [{"time": 0.0, "vrm_bones": {"NotABone": {"rotation": [0, 0, 0, 1]}}}],
+    }), encoding="utf-8")
+    with pytest.raises(CharacterMotionError, match="Unsupported VRM bone"):
+        load_motion_file(path)
+

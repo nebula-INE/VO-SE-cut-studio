@@ -25,6 +25,7 @@ from timeline_model import TimelineClip, TimelineModel
 from subtitle_overlay import render_subtitle_png
 from character_motion import CharacterMotionError, load_motion_file, sample_motion
 from character_renderer import render_character_frame
+from vrm_mocap import motion_state_to_vrm_pose
 from lipsync import extract_lipsync_frames, mouth_openness_at, vowels_at
 
 BUILTIN_2D_CHARACTER_ID = "__aural_builtin_2d_character__"
@@ -71,7 +72,7 @@ def timeline_motion_clips(model: TimelineModel) -> list[TimelineClip]:
                 for character in characters
             ):
                 raise VideoRenderError(
-                    f"モーションクリップ「{clip.name}」に重なる2Dキャラクタークリップがありません"
+                    f"モーションクリップ「{clip.name}」に重なるキャラクタークリップがありません"
                 )
             selected.append(clip)
     return selected
@@ -80,6 +81,8 @@ def timeline_motion_clips(model: TimelineModel) -> list[TimelineClip]:
 def timeline_video_clips(
     model: TimelineModel,
     subtitle_texts: Mapping[str, str] | None = None,
+    *,
+    allow_vrm: bool = False,
 ) -> list[TimelineClip]:
     """Return enabled visible video, image, subtitle and built-in character clips."""
     selected: list[TimelineClip] = []
@@ -97,12 +100,12 @@ def timeline_video_clips(
             if clip.kind == "motion":
                 unsupported.append(f"motion: {clip.name}")
             elif clip.kind == "character":
-                if clip.asset_id is not None:
+                if clip.asset_id is not None and not allow_vrm:
                     unsupported.append(
                         f"3D character asset: {clip.name} "
-                        "(VRM/FBX等のオフライン描画は未対応)"
+                        "(VRMのオフライン描画にはQt WebEngineが必要です)"
                     )
-                elif clip.script_line_id != BUILTIN_2D_CHARACTER_ID:
+                elif clip.asset_id is None and clip.script_line_id != BUILTIN_2D_CHARACTER_ID:
                     unsupported.append(
                         f"character: {clip.name} (組み込み2Dキャラクターとして追加してください)"
                     )
@@ -254,6 +257,41 @@ def _render_character_sequence(
     return sequence_dir / "frame_%06d.png"
 
 
+def _render_vrm_sequence(
+    clip: TimelineClip,
+    model_path: Path,
+    sequence_dir: Path,
+    frame_rate: float,
+    motion_entries: list[tuple[TimelineClip, list[dict]]],
+    voice_entries: list[tuple[TimelineClip, list]],
+    frame_renderer: Callable[[str | Path, dict, float], bytes],
+) -> Path:
+    """Render a VRM clip as transparent PNG frames using the Qt WebEngine bridge."""
+    if model_path.suffix.lower() != ".vrm" or not model_path.is_file():
+        raise VideoRenderError(
+            f"3Dキャラクター「{clip.name}」の素材はVRM 0.x / 1.0の .vrm が必要です"
+        )
+    sequence_dir.mkdir(parents=True, exist_ok=True)
+    frame_count = max(1, int(math.ceil(clip.duration * frame_rate - 1e-9)))
+    for frame_index in range(frame_count):
+        local_time = min(frame_index / frame_rate, max(0.0, clip.duration - 1e-9))
+        timeline_time = clip.start + local_time
+        state = _character_state_at(timeline_time, motion_entries, voice_entries)
+        pose = motion_state_to_vrm_pose(state)
+        try:
+            image = frame_renderer(model_path, pose, frame_rate)
+        except Exception as exc:
+            raise VideoRenderError(
+                f"VRMキャラクター「{clip.name}」のフレーム {frame_index} を描画できません: {exc}"
+            ) from exc
+        if not isinstance(image, bytes) or not image.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise VideoRenderError(
+                f"VRMキャラクター「{clip.name}」のフレーム {frame_index} が有効なPNGではありません"
+            )
+        (sequence_dir / f"frame_{frame_index:06d}.png").write_bytes(image)
+    return sequence_dir / "frame_%06d.png"
+
+
 def render_timeline_video(
     model: TimelineModel,
     asset_resolver: Callable[[TimelineClip], str | Path],
@@ -265,6 +303,7 @@ def render_timeline_video(
     subtitle_texts: Mapping[str, str] | None = None,
     motion_clips: Iterable[TimelineClip] | None = None,
     voice_clips: Iterable[TimelineClip] = (),
+    vrm_frame_renderer: Callable[[str | Path, dict, float], bytes] | None = None,
 ) -> VideoRenderResult:
     """Composite enabled visual clips and animated 2D characters into an MP4.
 
@@ -272,7 +311,9 @@ def render_timeline_video(
     motion is loaded from aural-motion JSON assets and voice clips provide
     automatic mouth movement when they are PCM16 WAV files.
     """
-    clips = timeline_video_clips(model, subtitle_texts)
+    clips = timeline_video_clips(
+        model, subtitle_texts, allow_vrm=vrm_frame_renderer is not None
+    )
     selected_motion = list(motion_clips) if motion_clips is not None else timeline_motion_clips(model)
     selected_voice = list(voice_clips)
 
@@ -296,7 +337,9 @@ def render_timeline_video(
     resolved: list[tuple[TimelineClip, Path | None]] = []
     protected_sources: set[Path] = set()
     for clip in clips:
-        if clip.kind in {"text", "character"}:
+        if clip.kind == "text" or (
+            clip.kind == "character" and clip.asset_id is None
+        ):
             resolved.append((clip, None))
             continue
         try:
@@ -308,6 +351,10 @@ def render_timeline_video(
         if not source.is_file():
             raise VideoRenderError(
                 f"映像クリップ「{clip.name}」の素材ファイルが見つかりません: {source}"
+            )
+        if clip.kind == "character" and source.suffix.lower() != ".vrm":
+            raise VideoRenderError(
+                f"3Dキャラクター「{clip.name}」はVRM 0.x / 1.0の .vrm のみ対応しています"
             )
         protected_sources.add(source)
         resolved.append((clip, source))
@@ -382,17 +429,33 @@ def render_timeline_video(
         ]
         for index, (clip, source) in enumerate(resolved):
             if clip.kind == "character":
-                pattern = _render_character_sequence(
-                    clip,
-                    character_dir / f"character_{index}",
-                    frame_rate,
-                    [
-                        (motion, frames)
-                        for motion, frames in motion_entries
-                        if motion.start < clip.end and motion.end > clip.start
-                    ],
-                    voice_entries,
-                )
+                overlapping_motion = [
+                    (motion, frames)
+                    for motion, frames in motion_entries
+                    if motion.start < clip.end and motion.end > clip.start
+                ]
+                if source is not None:
+                    if vrm_frame_renderer is None:
+                        raise VideoRenderError(
+                            f"VRMキャラクター「{clip.name}」のフレームレンダラーがありません"
+                        )
+                    pattern = _render_vrm_sequence(
+                        clip,
+                        source,
+                        character_dir / f"character_{index}",
+                        frame_rate,
+                        overlapping_motion,
+                        voice_entries,
+                        vrm_frame_renderer,
+                    )
+                else:
+                    pattern = _render_character_sequence(
+                        clip,
+                        character_dir / f"character_{index}",
+                        frame_rate,
+                        overlapping_motion,
+                        voice_entries,
+                    )
                 command.extend([
                     "-framerate", _filter_number(frame_rate),
                     "-start_number", "0",

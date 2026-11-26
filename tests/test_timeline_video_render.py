@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import subprocess
 from pathlib import Path
 
+from PIL import Image
 import pytest
 
 import timeline_video_render
@@ -12,6 +14,7 @@ from timeline_video_render import (
     render_timeline_video,
     timeline_motion_clips,
     timeline_video_clips,
+    _render_vrm_sequence,
 )
 
 
@@ -369,3 +372,94 @@ def test_timeline_video_clips_reject_external_3d_character_assets():
 
     with pytest.raises(VideoRenderError, match="3D character asset"):
         timeline_video_clips(model)
+
+
+
+def _transparent_png_bytes(size=(12, 12)) -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGBA", size, (0, 0, 0, 0)).save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def test_timeline_video_clips_requires_a_renderer_for_vrm_assets():
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    clip = model.add_clip(
+        overlay.id, "character", "VRM avatar", 1.0, asset_id="vrm-asset"
+    )
+
+    with pytest.raises(VideoRenderError, match="Qt WebEngine"):
+        timeline_video_clips(model)
+
+    assert timeline_video_clips(model, allow_vrm=True) == [clip]
+
+
+def test_render_timeline_video_renders_vrm_frames_to_transparent_sequence(
+    tmp_path, monkeypatch
+):
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    model.add_clip(
+        overlay.id, "character", "VRM avatar", 0.1, asset_id="vrm-asset"
+    )
+    model.frame_rate = 30.0
+    vrm_path = tmp_path / "avatar.vrm"
+    vrm_path.write_bytes(b"VRM fixture")
+    output = tmp_path / "vrm-output.mp4"
+    executable = tmp_path / "ffmpeg"
+    executable.write_bytes(b"fake ffmpeg")
+    captured = {"frames": []}
+
+    def renderer(path, pose, fps):
+        captured["frames"].append((Path(path), pose, fps))
+        return _transparent_png_bytes()
+
+    monkeypatch.setattr(
+        timeline_video_render, "find_ffmpeg_executable", lambda *_args: str(executable)
+    )
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"rendered vrm mp4")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(timeline_video_render.subprocess, "run", fake_run)
+    result = render_timeline_video(
+        model,
+        lambda _clip: vrm_path,
+        output,
+        ffmpeg_path=executable,
+        vrm_frame_renderer=renderer,
+    )
+
+    assert result.character_clip_count == 1
+    assert result.video_clip_count == 0
+    assert len(captured["frames"]) == 3
+    assert all(path == vrm_path for path, _pose, _fps in captured["frames"])
+    assert all(fps == 30.0 for _path, _pose, fps in captured["frames"])
+    assert all("bones" in pose and "expressions" in pose for _path, pose, _fps in captured["frames"])
+    graph = captured["command"][captured["command"].index("-filter_complex") + 1]
+    assert "format=rgba" in graph
+    assert "overlay=" in graph
+    assert output.read_bytes() == b"rendered vrm mp4"
+
+
+def test_vrm_sequence_rejects_non_png_frame_output(tmp_path):
+    model = TimelineModel.create_default()
+    overlay = next(track for track in model.tracks if track.kind == "overlay")
+    clip = model.add_clip(
+        overlay.id, "character", "VRM avatar", 0.1, asset_id="vrm-asset"
+    )
+    vrm_path = tmp_path / "avatar.vrm"
+    vrm_path.write_bytes(b"VRM fixture")
+
+    with pytest.raises(VideoRenderError, match="有効なPNG"):
+        _render_vrm_sequence(
+            clip,
+            vrm_path,
+            tmp_path / "frames",
+            30.0,
+            [],
+            [],
+            lambda *_args: b"not a png",
+        )

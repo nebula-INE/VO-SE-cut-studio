@@ -168,7 +168,7 @@ def _normalize_keyframe(raw: Any, index: int) -> dict[str, Any]:
 
 
 def load_motion_file(path: str | Path) -> list[dict[str, Any]]:
-    """Load and validate an aural-motion v1 JSON file."""
+    """Load and validate a backward-compatible aural-motion v1/v2 JSON file."""
     source = Path(path).expanduser()
     try:
         size = source.stat().st_size
@@ -229,22 +229,29 @@ def _interpolate_vrm_transform(
     right: dict[str, Any] | None,
     amount: float,
 ) -> dict[str, Any]:
-    if left is None:
-        return dict(right or {})
-    if right is None:
-        return dict(left)
+    if left is None and right is None:
+        return {}
+    left_values = left or {}
+    right_values = right or {}
     result: dict[str, Any] = {}
-    if "position" in left and "position" in right:
+
+    # Recordings start with an empty snapshot before the first incoming VMC
+    # packet. Blend that first packet from a neutral transform instead of
+    # snapping the avatar into the pose before the first recorded timestamp.
+    if "position" in right_values:
+        start_position = left_values.get("position", (0.0, 0.0, 0.0))
         result["position"] = tuple(
             _lerp(a, b, amount)
-            for a, b in zip(left["position"], right["position"])
+            for a, b in zip(start_position, right_values["position"])
         )
-    elif "position" in left or "position" in right:
-        result["position"] = (left if "position" in left else right)["position"]
-    if "rotation" in left and "rotation" in right:
-        result["rotation"] = _slerp(left["rotation"], right["rotation"], amount)
-    elif "rotation" in left or "rotation" in right:
-        result["rotation"] = (left if "rotation" in left else right)["rotation"]
+    elif "position" in left_values:
+        result["position"] = left_values["position"]
+
+    if "rotation" in right_values:
+        start_rotation = left_values.get("rotation", (0.0, 0.0, 0.0, 1.0))
+        result["rotation"] = _slerp(start_rotation, right_values["rotation"], amount)
+    elif "rotation" in left_values:
+        result["rotation"] = left_values["rotation"]
     return result
 
 
@@ -351,7 +358,7 @@ def motion_duration(keyframes: list[dict[str, Any]]) -> float:
 
 
 def save_motion_file(path: str | Path, keyframes: list[dict[str, Any]]) -> Path:
-    """Validate and atomically save an aural-motion v1 JSON file."""
+    """Validate and atomically save an aural-motion v1 or v2 JSON file."""
     destination = Path(path).expanduser()
     if not isinstance(keyframes, list) or not keyframes:
         raise CharacterMotionError("Motion recording must contain at least one keyframe")

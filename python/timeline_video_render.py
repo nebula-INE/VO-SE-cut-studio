@@ -199,6 +199,26 @@ def _motion_entries_for_character(
     ]
 
 
+def motion_clips_for_character(
+    model: TimelineModel,
+    character_clip: TimelineClip,
+    motion_clips: Iterable[TimelineClip],
+) -> list[TimelineClip]:
+    """Return the motion clips paired with one character using timeline track order.
+
+    A single visible Motion track remains shared for backward compatibility.
+    With multiple character and Motion tracks, each character track is paired
+    with the Motion track at the same visible track index.
+    """
+    entries = [(clip, []) for clip in motion_clips]
+    return [
+        motion_clip
+        for motion_clip, _frames in _motion_entries_for_character(
+            model, character_clip, entries
+        )
+    ]
+
+
 def _character_lane_assignments(
     character_clips: Iterable[TimelineClip],
 ) -> dict[str, tuple[int, int]]:

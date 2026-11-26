@@ -7,6 +7,7 @@ from typing import Callable
 
 from character_motion import SUPPORTED_BONES
 from expression import normalize_blend_shapes
+from vrm_mocap import SUPPORTED_VRM_BONES
 
 FRAME_RATE = 30.0
 MAX_RECORDING_SECONDS = 300.0
@@ -50,6 +51,8 @@ class MotionCaptureRecorder:
         self._shapes: dict[str, float] = {}
         self._vowels: dict[str, float] = {}
         self._bones: dict[str, tuple[float, float, float, float]] = {}
+        self._head_3d: dict | None = None
+        self._vrm_bones: dict[str, dict] = {}
         self._frames: list[dict] = []
 
     @property
@@ -67,6 +70,8 @@ class MotionCaptureRecorder:
         self._last_capture = 0.0
         self._head = {"x": 0.0, "y": 0.0, "tilt_deg": 0.0}
         self._shapes, self._vowels, self._bones, self._frames = {}, {}, {}, []
+        self._head_3d = None
+        self._vrm_bones = {}
         self._recording = True
         self._frames.append(self._snapshot(0.0))
 
@@ -77,6 +82,55 @@ class MotionCaptureRecorder:
                 "y": _finite(y, "head.y"),
                 "tilt_deg": _finite(tilt_deg, "head.tilt_deg"),
             }
+
+    def update_vrm_head(
+        self,
+        x: float, y: float, z: float,
+        qx: float, qy: float, qz: float, qw: float,
+    ) -> None:
+        """Update the full 3D head transform used by VRM 0.x/1.0 playback."""
+        if not self._recording:
+            return
+        position = tuple(
+            _finite(value, f"head_3d.{axis}")
+            for axis, value in zip(("x", "y", "z"), (x, y, z))
+        )
+        rotation = tuple(
+            _finite(value, "head_3d quaternion")
+            for value in (qx, qy, qz, qw)
+        )
+        norm = math.sqrt(sum(value * value for value in rotation))
+        if norm < 1e-8:
+            return
+        self._head_3d = {
+            "position": list(position),
+            "rotation": [value / norm for value in rotation],
+        }
+
+    def update_vrm_bone(
+        self,
+        name: str,
+        x: float, y: float, z: float,
+        qx: float, qy: float, qz: float, qw: float,
+    ) -> None:
+        """Record raw VMC positions and normalized rotations for VRM humanoid bones."""
+        if not self._recording or name not in SUPPORTED_VRM_BONES or name == "Head":
+            return
+        position = tuple(
+            _finite(value, f"{name} position")
+            for value in (x, y, z)
+        )
+        rotation = tuple(
+            _finite(value, f"{name} quaternion")
+            for value in (qx, qy, qz, qw)
+        )
+        norm = math.sqrt(sum(value * value for value in rotation))
+        if norm < 1e-8:
+            return
+        self._vrm_bones[name] = {
+            "position": list(position),
+            "rotation": [value / norm for value in rotation],
+        }
 
     def update_blend_shapes(self, values: dict[str, float]) -> None:
         if not self._recording or not isinstance(values, dict):
@@ -104,13 +158,27 @@ class MotionCaptureRecorder:
         self._bones[name] = tuple(value / norm for value in values)
 
     def _snapshot(self, elapsed: float) -> dict:
-        return {
+        frame = {
             "time": round(max(0.0, elapsed), 6),
             "head": dict(self._head),
             "blend_shapes": dict(self._shapes),
             "vowels": dict(self._vowels),
             "bones": {key: list(value) for key, value in sorted(self._bones.items())},
         }
+        if self._head_3d is not None:
+            frame["head_3d"] = {
+                "position": list(self._head_3d["position"]),
+                "rotation": list(self._head_3d["rotation"]),
+            }
+        if self._vrm_bones:
+            frame["vrm_bones"] = {
+                name: {
+                    "position": list(transform["position"]),
+                    "rotation": list(transform["rotation"]),
+                }
+                for name, transform in sorted(self._vrm_bones.items())
+            }
+        return frame
 
     def capture(self, *, now: float | None = None, force: bool = False) -> bool:
         if not self._recording:
@@ -141,6 +209,11 @@ class MotionCaptureRecorder:
             tuple(sorted(frame["blend_shapes"].items())),
             tuple(sorted(frame["vowels"].items())),
             tuple((key, tuple(value)) for key, value in sorted(frame["bones"].items())),
+            repr(frame.get("head_3d")),
+            tuple(
+                (key, tuple(value["position"]), tuple(value["rotation"]))
+                for key, value in sorted(frame.get("vrm_bones", {}).items())
+            ),
         )
 
     def stop(self, *, now: float | None = None) -> list[dict]:
@@ -162,6 +235,21 @@ class MotionCaptureRecorder:
                     "blend_shapes": dict(frame["blend_shapes"]),
                     "vowels": dict(frame["vowels"]),
                     "bones": {key: list(value) for key, value in frame["bones"].items()},
+                    **({
+                        "head_3d": {
+                            "position": list(frame["head_3d"]["position"]),
+                            "rotation": list(frame["head_3d"]["rotation"]),
+                        }
+                    } if "head_3d" in frame else {}),
+                    **({
+                        "vrm_bones": {
+                            name: {
+                                "position": list(transform["position"]),
+                                "rotation": list(transform["rotation"]),
+                            }
+                            for name, transform in frame["vrm_bones"].items()
+                        }
+                    } if "vrm_bones" in frame else {}),
                 }
                 for frame in self._frames
             ]
@@ -174,3 +262,5 @@ class MotionCaptureRecorder:
         self._shapes.clear()
         self._vowels.clear()
         self._bones.clear()
+        self._head_3d = None
+        self._vrm_bones.clear()

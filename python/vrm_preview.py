@@ -316,7 +316,15 @@ class VRMViewerWidget(QWidget):
             if name not in SUPPORTED_VRM_BONE_NAMES or not isinstance(raw_transform, dict):
                 continue
             try:
-                rotation = normalize_quaternion(raw_transform.get("rotation", ()))
+                raw_rotation = raw_transform.get("rotation", ())
+                if not isinstance(raw_rotation, (list, tuple)) or len(raw_rotation) != 4:
+                    continue
+                rotation_values = tuple(float(value) for value in raw_rotation)
+                if not all(math.isfinite(value) for value in rotation_values):
+                    continue
+                if math.sqrt(sum(value * value for value in rotation_values)) < 1e-8:
+                    continue
+                rotation = normalize_quaternion(rotation_values)
                 transform = {"rotation": rotation}
                 position = raw_transform.get("position")
                 if name in {"head", "hips"} and position is not None:

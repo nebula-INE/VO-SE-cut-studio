@@ -188,11 +188,17 @@ def test_vrm_motion_v2_round_trips_and_interpolates_full_body_pose(tmp_path):
 def test_motion_v1_rejects_vrm_fields_and_v2_rejects_unknown_bones(tmp_path):
     from character_motion import save_motion_file
 
+    legacy_path = tmp_path / "bad-v1.motion.json"
+    legacy_path.write_text(json.dumps({
+        "format": "aural-motion",
+        "version": 1,
+        "keyframes": [{
+            "time": 0.0,
+            "head_3d": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1]},
+        }],
+    }), encoding="utf-8")
     with pytest.raises(CharacterMotionError, match="version 1"):
-        save_motion_file(
-            tmp_path / "bad-v1.motion.json",
-            [{"time": 0.0, "head_3d": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1]}}],
-        )
+        load_motion_file(legacy_path)
 
     path = tmp_path / "bad-v2.motion.json"
     path.write_text(json.dumps({

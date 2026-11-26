@@ -111,3 +111,21 @@ def test_timeline_motion_pose_rejects_invalid_quaternion() -> None:
     })
     assert target._timeline_state["bones"] == {}
 
+def test_timeline_motion_pose_preserves_only_head_and_hips_positions() -> None:
+    target = SimpleNamespace(_timeline_state=None)
+    VRMViewerWidget.set_timeline_motion_state(target, {
+        "bones": {
+            "leftUpperArm": {
+                "position": (9.0, 9.0, 9.0),
+                "rotation": (0.0, 0.0, 0.0, 1.0),
+            },
+            "hips": {
+                "position": (0.1, 0.2, 0.3),
+                "rotation": (0.0, 0.0, 0.0, 1.0),
+            },
+        },
+        "expressions": {},
+    })
+    assert "position" not in target._timeline_state["bones"]["leftUpperArm"]
+    assert target._timeline_state["bones"]["hips"]["position"] == (0.1, 0.2, 0.3)
+

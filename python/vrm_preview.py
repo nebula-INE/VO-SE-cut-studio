@@ -17,7 +17,12 @@ from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from vrm_mocap import normalize_blend_shapes, normalize_quaternion, vmc_bone_to_vrm
+from vrm_mocap import (
+    SUPPORTED_VRM_BONE_NAMES,
+    normalize_blend_shapes,
+    normalize_quaternion,
+    vmc_bone_to_vrm,
+)
 
 
 class _ViewerHttpServer(http.server.ThreadingHTTPServer):
@@ -86,6 +91,7 @@ class VRMViewerWidget(QWidget):
         self._ready_probe_count = 0
         self._bones: dict[str, dict] = {}
         self._expressions: dict[str, float] = {}
+        self._timeline_state: dict | None = None
         self._server: _ViewerHttpServer | None = None
         self._server_thread: threading.Thread | None = None
         self._viewer_origin: str | None = None
@@ -222,6 +228,7 @@ class VRMViewerWidget(QWidget):
     def close_model(self) -> None:
         self._pending_model_path = None
         self._model_url = None
+        self._timeline_state = None
         if self._server is not None:
             self._server.model_path = None
             self._server.model_route = self._new_model_route()
@@ -297,6 +304,39 @@ class VRMViewerWidget(QWidget):
         except (TypeError, ValueError, OverflowError):
             return
 
+    def set_timeline_motion_state(self, state: dict) -> None:
+        """Apply a sampled motion pose, taking precedence over live mocap input."""
+        if not isinstance(state, dict):
+            return
+        raw_bones = state.get("bones", {})
+        if not isinstance(raw_bones, dict):
+            return
+        bones: dict[str, dict] = {}
+        for name, raw_transform in raw_bones.items():
+            if name not in SUPPORTED_VRM_BONE_NAMES or not isinstance(raw_transform, dict):
+                continue
+            try:
+                rotation = normalize_quaternion(raw_transform.get("rotation", ()))
+                transform = {"rotation": rotation}
+                position = raw_transform.get("position")
+                if name in {"head", "hips"} and position is not None:
+                    values = tuple(float(value) for value in position)
+                    if len(values) != 3 or not all(math.isfinite(value) for value in values):
+                        continue
+                    transform["position"] = values
+                bones[name] = transform
+            except (TypeError, ValueError, OverflowError):
+                continue
+        try:
+            expressions = normalize_blend_shapes(state.get("expressions", {}))
+        except (TypeError, ValueError, OverflowError):
+            expressions = {}
+        self._timeline_state = {"bones": bones, "expressions": expressions}
+
+    def clear_timeline_motion_state(self) -> None:
+        """Return pose priority to live VMC/WebSocket updates."""
+        self._timeline_state = None
+
     def _on_page_loaded(self, success: bool) -> None:
         self._page_ready = bool(success)
         if not success:
@@ -340,7 +380,10 @@ class VRMViewerWidget(QWidget):
     def _flush_mocap_state(self) -> None:
         if not self._page_ready or self._web_view is None:
             return
-        state = {"bones": self._bones, "expressions": self._expressions}
+        state = self._timeline_state or {
+            "bones": self._bones,
+            "expressions": self._expressions,
+        }
         try:
             payload = json.dumps(state, allow_nan=False, separators=(",", ":"))
         except (TypeError, ValueError):

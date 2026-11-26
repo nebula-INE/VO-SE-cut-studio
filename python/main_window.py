@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import platform
 import subprocess
 import sys
@@ -57,7 +58,13 @@ from timeline_video_render import (
     timeline_motion_clips,
     timeline_video_clips,
 )
-from character_motion import save_motion_file
+from character_motion import (
+    CharacterMotionError,
+    load_motion_file,
+    sample_motion,
+    save_motion_file,
+)
+from vrm_mocap import normalize_blend_shapes, vmc_bone_to_vrm
 from motion_capture_recorder import (
     FRAME_RATE as MOTION_CAPTURE_FRAME_RATE,
     MAX_RECORDING_SECONDS,
@@ -376,6 +383,7 @@ class MainWindow(QMainWindow):
         self._project.script = self.script_panel.model.to_dict()
         self._pending_generated_audio: dict[str, tuple[str, str]] = {}
         self._motion_capture_recorder = MotionCaptureRecorder()
+        self._vrm_motion_cache: dict[str, tuple[str, int, list[dict]]] = {}
         self._motion_capture_timer = QTimer(self)
         self._motion_capture_timer.setInterval(round(1000 / MOTION_CAPTURE_FRAME_RATE))
         self._motion_capture_timer.timeout.connect(self._capture_motion_frame)
@@ -460,8 +468,10 @@ class MainWindow(QMainWindow):
             self.mocap_bridge.blend_shapes_received.connect(self.preview_panel.set_blend_shapes)
             self.mocap_bridge.bone_transform_received.connect(self.preview_panel.set_bone_transform)
             self.mocap_bridge.head_transform_received.connect(self._record_motion_head)
+            self.mocap_bridge.head_quaternion_received.connect(self._record_motion_head_3d)
             self.mocap_bridge.blend_shapes_received.connect(self._record_motion_blend_shapes)
             self.mocap_bridge.bone_transform_received.connect(self._record_motion_bone)
+            self.mocap_bridge.bone_transform_3d_received.connect(self._record_motion_bone_3d)
             self.mocap_bridge.start()
 
         # VRM 3Dプレビュー。WebEngineが利用できる配布環境では実際のVRM
@@ -1066,6 +1076,7 @@ class MainWindow(QMainWindow):
         self.timeline_audio.pause()
         self.timeline_panel.set_playback_state(False)
         self.timeline_panel.set_playhead(0.0)
+        self._update_vrm_timeline_pose(0.0)
         if self.preview_panel.decoder is not None:
             clip = self._video_clip_at(0.0)
             active_asset_id = self._project.settings.get("active_video_asset_id")
@@ -1081,6 +1092,7 @@ class MainWindow(QMainWindow):
         if not self._timeline_playback_requested or self.preview_panel.is_playing:
             return
         self.timeline_panel.set_playhead(seconds)
+        self._update_vrm_timeline_pose(seconds)
 
         if self._pending_timeline_clip_id is None:
             clip = self._video_clip_at(seconds)
@@ -1106,6 +1118,7 @@ class MainWindow(QMainWindow):
         if clip is not None and clip.kind == "video":
             timeline_seconds = clip.timeline_time_at(source_seconds)
             self.timeline_panel.set_playhead(timeline_seconds)
+            self._update_vrm_timeline_pose(timeline_seconds)
             if self._timeline_playback_requested and self.preview_panel.is_playing:
                 if self.timeline_audio.is_playing:
                     self.timeline_audio.sync_to_timeline(timeline_seconds)
@@ -1119,6 +1132,7 @@ class MainWindow(QMainWindow):
                 self._advance_timeline_video_clip(clip)
         else:
             self.timeline_panel.set_playhead(source_seconds)
+            self._update_vrm_timeline_pose(source_seconds)
 
     def _on_preview_playback_state_changed(self, playing: bool) -> None:
         """Track user transport changes and start/stop the timeline audio clock."""
@@ -1272,6 +1286,7 @@ class MainWindow(QMainWindow):
         if not self._timeline_playback_transition:
             self._timeline_playback_generation += 1
             self._pending_timeline_clip_id = None
+        self._update_vrm_timeline_pose(seconds)
         if self.timeline_audio.is_playing:
             self.timeline_audio.sync_to_timeline(seconds)
         clip = self._video_clip_at(seconds)
@@ -1757,6 +1772,41 @@ class MainWindow(QMainWindow):
             except MotionCaptureRecordingError as exc:
                 self.statusBar().showMessage(f"モーション値を無視しました: {exc}", 5000)
 
+    def _record_motion_head_3d(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_head_3d(x, y, z, qx, qy, qz, qw)
+            except (MotionCaptureRecordingError, TypeError, ValueError) as exc:
+                self.statusBar().showMessage(f"VRM頭部データを無視しました: {exc}", 5000)
+
+    def _record_motion_bone_3d(
+        self,
+        name: str,
+        x: float,
+        y: float,
+        z: float,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> None:
+        if self._motion_capture_recorder.is_recording:
+            try:
+                self._motion_capture_recorder.update_bone_3d(
+                    name, x, y, z, qx, qy, qz, qw
+                )
+            except (MotionCaptureRecordingError, TypeError, ValueError) as exc:
+                self.statusBar().showMessage(f"VRMボーンデータを無視しました: {exc}", 5000)
+
     def _record_motion_blend_shapes(self, values: dict) -> None:
         if self._motion_capture_recorder.is_recording:
             try:
@@ -1772,6 +1822,121 @@ class MainWindow(QMainWindow):
                 self._motion_capture_recorder.update_bone(name, qx, qy, qz, qw)
             except MotionCaptureRecordingError as exc:
                 self.statusBar().showMessage(f"ボーンデータを無視しました: {exc}", 5000)
+
+    def _update_vrm_timeline_pose(self, timeline_seconds: float) -> None:
+        """Sample an active motion clip and apply it to the currently active VRM."""
+        if not _VRM_VIEWER_AVAILABLE or self.preview_3d_dock is None:
+            return
+        try:
+            model = self.timeline_panel.model
+            active_characters = []
+            for clip in model.clips:
+                if clip.kind != "character" or not clip.enabled:
+                    continue
+                if not clip.start <= timeline_seconds < clip.end:
+                    continue
+                track = model.get_track(clip.track_id)
+                if track is None or track.muted or not track.visible or clip.asset_id is None:
+                    continue
+                asset = self._project.get_asset(clip.asset_id)
+                if asset is None:
+                    continue
+                path = self._project.resolve_asset(asset)
+                if path.suffix.lower() == ".vrm" and path.is_file():
+                    active_characters.append((clip, path))
+
+            if len(active_characters) > 1:
+                self.preview_3d_widget.set_timeline_state(None)
+                self.statusBar().showMessage(
+                    "同じ時間帯に複数のVRMキャラクターがあります。1体ずつ配置してください。",
+                    5000,
+                )
+                return
+            if active_characters:
+                _clip, character_path = active_characters[0]
+                if self.preview_3d_widget.model_path != character_path.resolve():
+                    self.preview_3d_widget.load_model(character_path)
+                if not self.preview_3d_dock.isVisible():
+                    self.preview_3d_dock.show()
+
+            active_motion = []
+            for clip in model.clips:
+                if clip.kind != "motion" or not clip.enabled or clip.asset_id is None:
+                    continue
+                if not clip.start <= timeline_seconds < clip.end:
+                    continue
+                track = model.get_track(clip.track_id)
+                if track is None or track.muted or not track.visible:
+                    continue
+                active_motion.append(clip)
+
+            if not active_motion:
+                self.preview_3d_widget.set_timeline_state(None)
+                return
+            if len(active_motion) > 1:
+                self.preview_3d_widget.set_timeline_state(None)
+                self.statusBar().showMessage(
+                    "VRM再生中のモーションクリップが重なっています。",
+                    5000,
+                )
+                return
+
+            motion_clip = active_motion[0]
+            asset = self._project.get_asset(motion_clip.asset_id)
+            if asset is None:
+                self.preview_3d_widget.set_timeline_state(None)
+                return
+            source = self._project.resolve_asset(asset)
+            stat = source.stat()
+            cached = self._vrm_motion_cache.get(asset.id)
+            if cached is None or cached[0] != str(source) or cached[1] != stat.st_mtime_ns:
+                frames = load_motion_file(source)
+                self._vrm_motion_cache[asset.id] = (
+                    str(source), stat.st_mtime_ns, frames
+                )
+            else:
+                frames = cached[2]
+
+            local_time = motion_clip.source_in + timeline_seconds - motion_clip.start
+            sampled = sample_motion(frames, local_time)
+            bones: dict[str, dict] = {}
+            expressions = normalize_blend_shapes({
+                **sampled.get("blend_shapes", {}),
+                **sampled.get("vowels", {}),
+            })
+
+            vrm_state = sampled.get("vrm", {})
+            vrm_head = vrm_state.get("head", {})
+            if vrm_head:
+                bones["head"] = dict(vrm_head)
+            for name, transform in vrm_state.get("bones", {}).items():
+                bones[name] = dict(transform)
+
+            # v1 files contain 2D head tilt and arm rotations only. Map those to
+            # equivalent VRM transforms so existing recordings remain usable.
+            if "head" not in bones:
+                head = sampled.get("head", {})
+                half_angle = math.radians(float(head.get("tilt_deg", 0.0))) * 0.5
+                bones["head"] = {
+                    "position": (
+                        float(head.get("x", 0.0)),
+                        float(head.get("y", 0.0)),
+                        0.0,
+                    ),
+                    "rotation": (0.0, 0.0, math.sin(half_angle), math.cos(half_angle)),
+                }
+            for name, rotation in sampled.get("bones", {}).items():
+                normalized_name = vmc_bone_to_vrm(name)
+                if normalized_name is not None:
+                    bones.setdefault(normalized_name, {"rotation": rotation})
+
+            self.preview_3d_widget.set_timeline_state({
+                "bones": bones,
+                "expressions": expressions,
+            })
+        except (OSError, ProjectError, CharacterMotionError, TypeError, ValueError) as exc:
+            self.preview_3d_widget.set_timeline_state(None)
+            self.statusBar().showMessage(f"VRMモーションを再生できません: {exc}", 6000)
 
     def start_motion_capture_recording(self) -> None:
         """Start recording live OSC/VMC or WebSocket state into motion keyframes."""

@@ -37,10 +37,30 @@ scene.add(grid);
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 const clock = new THREE.Clock();
+const HUMANOID_BONE_NAMES = [
+  'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
+  'leftShoulder', 'leftUpperArm', 'leftLowerArm', 'leftHand',
+  'rightShoulder', 'rightUpperArm', 'rightLowerArm', 'rightHand',
+  'leftUpperLeg', 'leftLowerLeg', 'leftFoot', 'leftToes',
+  'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'rightToes',
+  'leftEye', 'rightEye', 'jaw',
+  'leftThumbMetacarpal', 'leftThumbProximal', 'leftThumbDistal',
+  'leftIndexProximal', 'leftIndexIntermediate', 'leftIndexDistal',
+  'leftMiddleProximal', 'leftMiddleIntermediate', 'leftMiddleDistal',
+  'leftRingProximal', 'leftRingIntermediate', 'leftRingDistal',
+  'leftLittleProximal', 'leftLittleIntermediate', 'leftLittleDistal',
+  'rightThumbMetacarpal', 'rightThumbProximal', 'rightThumbDistal',
+  'rightIndexProximal', 'rightIndexIntermediate', 'rightIndexDistal',
+  'rightMiddleProximal', 'rightMiddleIntermediate', 'rightMiddleDistal',
+  'rightRingProximal', 'rightRingIntermediate', 'rightRingDistal',
+  'rightLittleProximal', 'rightLittleIntermediate', 'rightLittleDistal',
+];
 
 let currentVrm = null;
 let headBasePosition = null;
 let hipsBasePosition = null;
+let boneRestTransforms = new Map();
+let appliedBoneNames = new Set();
 let previousExpressions = new Set();
 let modelLoadGeneration = 0;
 
@@ -65,6 +85,8 @@ function disposeCurrentModel() {
   currentVrm = null;
   headBasePosition = null;
   hipsBasePosition = null;
+  boneRestTransforms.clear();
+  appliedBoneNames.clear();
   previousExpressions.clear();
 }
 
@@ -120,6 +142,17 @@ async function loadModel(url) {
     const hips = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('hips');
     headBasePosition = head ? head.position.clone() : null;
     hipsBasePosition = hips ? hips.position.clone() : null;
+    boneRestTransforms = new Map();
+    for (const name of HUMANOID_BONE_NAMES) {
+      const node = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode(name);
+      if (node) {
+        boneRestTransforms.set(name, {
+          position: node.position.clone(),
+          quaternion: node.quaternion.clone(),
+        });
+      }
+    }
+    appliedBoneNames.clear();
     fitCamera(vrm);
     setStatus('読み込み完了: ' + (vrm.meta?.name || 'VRMモデル'));
   } catch (error) {
@@ -131,10 +164,25 @@ async function loadModel(url) {
 
 function applyMocapState(state) {
   if (!currentVrm || !state || typeof state !== 'object') return;
+
+  // Reset only the bones touched by the previous frame. This prevents a bone
+  // omitted by a sparse live packet or by the next timeline clip from staying
+  // frozen in a stale pose.
+  for (const name of appliedBoneNames) {
+    const node = currentVrm.humanoid && currentVrm.humanoid.getNormalizedBoneNode(name);
+    const rest = boneRestTransforms.get(name);
+    if (node && rest) {
+      node.position.copy(rest.position);
+      node.quaternion.copy(rest.quaternion);
+    }
+  }
+  appliedBoneNames.clear();
+
   const bones = state.bones || {};
   for (const [name, transform] of Object.entries(bones)) {
     const node = currentVrm.humanoid && currentVrm.humanoid.getNormalizedBoneNode(name);
     if (!node || !transform) continue;
+    appliedBoneNames.add(name);
     const rotation = transform.rotation;
     if (Array.isArray(rotation) && rotation.length === 4) {
       const [x, y, z, w] = rotation;

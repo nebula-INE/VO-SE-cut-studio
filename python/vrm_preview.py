@@ -1,6 +1,8 @@
 """Qt WebEngine host for the bundled, offline three-vrm character preview."""
 from __future__ import annotations
 
+import base64
+import binascii
 import functools
 import http.server
 import json
@@ -9,10 +11,11 @@ import secrets
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -79,6 +82,8 @@ def _viewer_index_path() -> Path | None:
 class VRMViewerWidget(QWidget):
     """Display local VRM 0.x/1.0 files and drive their normalized humanoid."""
 
+    _export_frame_requested = Signal(object)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setMinimumSize(360, 360)
@@ -120,6 +125,7 @@ class VRMViewerWidget(QWidget):
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(33)
         self._state_timer.timeout.connect(self._flush_mocap_state)
+        self._export_frame_requested.connect(self._handle_export_frame_request)
 
     @property
     def model_path(self) -> Path | None:
@@ -356,6 +362,152 @@ class VRMViewerWidget(QWidget):
             QTimer.singleShot(100, self._send_model_when_ready)
         else:
             self.status_label.setText("VRMビューアの初期化に失敗しました")
+
+    def render_frame_png(
+        self,
+        model_path: str | Path,
+        pose: dict,
+        frame_rate: float,
+        *,
+        timeout_seconds: float = 120.0,
+    ) -> bytes:
+        """Render one transparent VRM PNG frame from a non-GUI export worker.
+
+        The worker waits on a threading.Event while the GUI thread performs the
+        WebEngine operation. No QWidget or QWebEngine object is touched by the
+        worker thread.
+        """
+        try:
+            fps = float(frame_rate)
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("VRM render frame rate and timeout must be numeric") from exc
+        if not math.isfinite(fps) or not 1.0 <= fps <= 240.0:
+            raise ValueError("VRM render frame rate must be between 1 and 240")
+        if not math.isfinite(timeout) or not 1.0 <= timeout <= 600.0:
+            raise ValueError("VRM frame render timeout must be between 1 and 600 seconds")
+        if not isinstance(pose, dict):
+            raise ValueError("VRM render pose must be an object")
+
+        request = {
+            "model_path": str(Path(model_path).expanduser().resolve(strict=True)),
+            "pose": pose,
+            "frame_rate": fps,
+            "deadline": time.monotonic() + timeout,
+            "event": threading.Event(),
+            "result": None,
+            "error": None,
+        }
+        self._export_frame_requested.emit(request)
+        if not request["event"].wait(timeout + 1.0):
+            raise TimeoutError("VRM frame renderer did not respond before the timeout")
+        if request["error"] is not None:
+            raise RuntimeError(str(request["error"]))
+        result = request["result"]
+        if not isinstance(result, bytes) or not result.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):
+            raise RuntimeError("VRM frame renderer returned an invalid PNG image")
+        return result
+
+    @staticmethod
+    def _finish_export_frame_request(request: dict, *, result=None, error=None) -> None:
+        if request["event"].is_set():
+            return
+        request["result"] = result
+        request["error"] = error
+        request["event"].set()
+
+    def _handle_export_frame_request(self, request: dict) -> None:
+        """GUI-thread entry point for a blocking frame request from an export worker."""
+        if request["event"].is_set():
+            return
+        if time.monotonic() >= request["deadline"]:
+            self._finish_export_frame_request(
+                request, error="Timed out while preparing the VRM preview"
+            )
+            return
+        if not self._ensure_viewer():
+            self._finish_export_frame_request(
+                request, error=self.status_label.text()
+            )
+            return
+
+        target_path = Path(request["model_path"])
+        if self.model_path != target_path or self._model_url is None:
+            self.load_model(target_path)
+        if not self._page_ready or self._web_view is None or self._model_url is None:
+            QTimer.singleShot(
+                40, lambda current=request: self._handle_export_frame_request(current)
+            )
+            return
+
+        self._web_view.page().runJavaScript(
+            "window.axralVrmViewer?.getModelStatus()",
+            lambda status, current=request: self._on_export_model_status(current, status),
+        )
+
+    def _on_export_model_status(self, request: dict, status) -> None:
+        if request["event"].is_set():
+            return
+        if time.monotonic() >= request["deadline"]:
+            self._finish_export_frame_request(
+                request, error="Timed out while loading the VRM model for export"
+            )
+            return
+        if not isinstance(status, dict):
+            QTimer.singleShot(
+                40, lambda current=request: self._handle_export_frame_request(current)
+            )
+            return
+        load_error = status.get("error")
+        if load_error:
+            self._finish_export_frame_request(
+                request, error=f"Could not load VRM model: {load_error}"
+            )
+            return
+        if status.get("url") != self._model_url:
+            QTimer.singleShot(
+                40, lambda current=request: self._handle_export_frame_request(current)
+            )
+            return
+        if self._web_view is None:
+            self._finish_export_frame_request(
+                request, error="VRM WebEngine view was closed during export"
+            )
+            return
+
+        pose = json.dumps(request["pose"], allow_nan=False, separators=(",", ":"))
+        fps = json.dumps(request["frame_rate"])
+        script = (
+            "window.axralVrmViewer.renderFrameDataUrl("
+            + pose
+            + ", 768, 768, 1 / "
+            + fps
+            + ")"
+        )
+        self._web_view.page().runJavaScript(
+            script,
+            lambda data_url, current=request: self._on_export_frame_rendered(
+                current, data_url
+            ),
+        )
+
+    def _on_export_frame_rendered(self, request: dict, data_url) -> None:
+        if request["event"].is_set():
+            return
+        if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
+            self._finish_export_frame_request(
+                request, error="VRM WebEngine did not return a PNG frame"
+            )
+            return
+        try:
+            encoded = data_url.partition(",")[2]
+            image = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            self._finish_export_frame_request(
+                request, error=f"Could not decode VRM PNG frame: {exc}"
+            )
+            return
+        self._finish_export_frame_request(request, result=image)
 
     def _flush_mocap_state(self) -> None:
         if not self._page_ready or self._web_view is None:

@@ -46,7 +46,6 @@ jobs:
           npm install --no-audit --no-fund
           npm run check
           npm run build
-          npm run check
 
       - name: Set up Python
         uses: actions/setup-python@v5

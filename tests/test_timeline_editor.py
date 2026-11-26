@@ -135,3 +135,51 @@ def test_audio_clip_controls_are_disabled_for_video_and_locked_audio(qapp):
 
     editor.close()
     editor.deleteLater()
+
+
+
+def test_character_transform_controls_edit_selected_character_clip(qapp):
+    model = TimelineModel.create_default()
+    overlay = next(item for item in model.tracks if item.kind == "overlay")
+    clip = model.add_clip(
+        overlay.id, "character", "actor", 2.0, asset_id="actor.vrm"
+    )
+    editor = TimelineEditorWidget(model)
+    editor.canvas._set_selected_clip(clip.id)
+
+    assert editor.auto_character_position_checkbox.isEnabled()
+    assert editor.auto_character_position_checkbox.isChecked()
+    assert not editor.position_x_spinbox.isEnabled()
+
+    editor.auto_character_position_checkbox.setChecked(False)
+    editor.position_x_spinbox.setValue(25.0)
+    editor.position_y_spinbox.setValue(70.0)
+    editor.character_scale_spinbox.setValue(135.0)
+    editor.character_rotation_spinbox.setValue(-22.5)
+
+    assert clip.position_x == pytest.approx(0.25)
+    assert clip.position_y == pytest.approx(0.70)
+    assert clip.scale == pytest.approx(1.35)
+    assert clip.rotation_deg == pytest.approx(-22.5)
+
+    editor.close()
+    editor.deleteLater()
+
+
+def test_character_transform_controls_are_disabled_for_non_character_or_locked_clip(qapp):
+    model = TimelineModel.create_default()
+    video_track = next(item for item in model.tracks if item.kind == "video")
+    overlay = next(item for item in model.tracks if item.kind == "overlay")
+    video = model.add_clip(video_track.id, "video", "scene", 2.0, asset_id="scene.mp4")
+    actor = model.add_clip(overlay.id, "character", "actor", 2.0, asset_id="actor.vrm")
+    editor = TimelineEditorWidget(model)
+
+    editor.canvas._set_selected_clip(video.id)
+    assert not editor.auto_character_position_checkbox.isEnabled()
+
+    overlay.locked = True
+    editor.canvas._set_selected_clip(actor.id)
+    assert not editor.auto_character_position_checkbox.isEnabled()
+
+    editor.close()
+    editor.deleteLater()

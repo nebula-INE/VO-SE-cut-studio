@@ -39,6 +39,7 @@ from runtime_paths import find_runtime_file
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
+from timeline_track_selection import select_timeline_asset_track
 from timeline_model import TimelineError, TimelineModel
 from timeline_audio import TimelineAudioPlayback
 from timeline_audio_render import (
@@ -57,6 +58,7 @@ from timeline_video_render import (
     render_timeline_video,
     timeline_motion_clips,
     timeline_video_clips,
+    motion_clips_for_character,
 )
 from character_motion import (
     CharacterMotionError,
@@ -300,6 +302,7 @@ class _TimelineFullVideoExportTask(QRunnable):
         output_path: str,
         ffmpeg_path: str,
         subtitle_texts: dict[str, str] | None = None,
+        vrm_frame_renderer=None,
     ) -> None:
         super().__init__()
         self.timeline_payload = timeline_payload
@@ -307,12 +310,17 @@ class _TimelineFullVideoExportTask(QRunnable):
         self.output_path = output_path
         self.ffmpeg_path = ffmpeg_path
         self.subtitle_texts = dict(subtitle_texts or {})
+        self.vrm_frame_renderer = vrm_frame_renderer
         self.signals = _TimelineAudioRenderSignals()
 
     def run(self) -> None:
         try:
             model = TimelineModel.from_dict(self.timeline_payload)
-            visual_clips = timeline_video_clips(model, self.subtitle_texts)
+            visual_clips = timeline_video_clips(
+                model,
+                self.subtitle_texts,
+                allow_vrm=self.vrm_frame_renderer is not None,
+            )
             motion_clips = timeline_motion_clips(model)
             audio_clips = timeline_audio_clips(model)
             duration = max(
@@ -333,6 +341,7 @@ class _TimelineFullVideoExportTask(QRunnable):
                     subtitle_texts=self.subtitle_texts,
                     motion_clips=motion_clips,
                     voice_clips=audio_clips,
+                    vrm_frame_renderer=self.vrm_frame_renderer,
                 )
                 clipped_sample_count = 0
                 peak_level = 0.0
@@ -414,6 +423,7 @@ class MainWindow(QMainWindow):
         self._audio_render_task: _TimelineAudioRenderTask | None = None
         self._audio_video_export_task: _TimelineAudioVideoExportTask | None = None
         self._timeline_video_export_task: _TimelineFullVideoExportTask | None = None
+        self._hide_vrm_export_dock_after_export = False
         self._export_audio_mix_action = None
         self._export_audio_video_action = None
         self._export_timeline_video_action = None
@@ -1350,6 +1360,9 @@ class MainWindow(QMainWindow):
                 self.preview_3d_widget.load_model(str(character_path))
                 if self.preview_3d_dock is not None:
                     self.preview_3d_dock.show()
+                self._update_vrm_timeline_pose(
+                    self.timeline_panel.playhead_seconds
+                )
             except (OSError, ProjectError) as exc:
                 QMessageBox.warning(self, "VRMモデルを開けません", str(exc))
             return
@@ -1651,7 +1664,9 @@ class MainWindow(QMainWindow):
                 for line in self.script_panel.model.to_dict().get("lines", [])
                 if line.get("line_id") and str(line.get("text", "")).strip()
             }
-            visual_clips = timeline_video_clips(snapshot, subtitle_texts)
+            visual_clips = timeline_video_clips(
+                snapshot, subtitle_texts, allow_vrm=_VRM_VIEWER_AVAILABLE
+            )
         except (TimelineError, VideoRenderError) as exc:
             QMessageBox.warning(self, "タイムラインMP4書き出し", str(exc))
             return
@@ -1669,7 +1684,9 @@ class MainWindow(QMainWindow):
         try:
             asset_paths: dict[str, str] = {}
             for clip in all_clips:
-                if clip.kind in {"text", "character"}:
+                if clip.kind == "text" or (
+                    clip.kind == "character" and clip.asset_id is None
+                ):
                     continue
                 asset = self._project.get_asset(clip.asset_id or "")
                 if asset is None:
@@ -1713,12 +1730,25 @@ class MainWindow(QMainWindow):
             )
             return
 
+        has_vrm_clips = any(
+            clip.kind == "character" and clip.asset_id is not None
+            for clip in visual_clips
+        )
+        if has_vrm_clips and self.preview_3d_dock is not None:
+            self._hide_vrm_export_dock_after_export = not self.preview_3d_dock.isVisible()
+            self.preview_3d_dock.show()
+
         task = _TimelineFullVideoExportTask(
             snapshot.to_dict(),
             asset_paths,
             str(output_path),
             ffmpeg_path,
             subtitle_texts,
+            vrm_frame_renderer=(
+                self.preview_3d_widget.render_frame_png
+                if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None
+                else None
+            ),
         )
         task.signals.finished.connect(self._on_timeline_full_video_export_finished)
         task.signals.failed.connect(self._on_timeline_full_video_export_failed)
@@ -1733,6 +1763,9 @@ class MainWindow(QMainWindow):
 
     def _finish_timeline_full_video_export(self) -> None:
         self._timeline_video_export_task = None
+        if self._hide_vrm_export_dock_after_export and self.preview_3d_dock is not None:
+            self.preview_3d_dock.hide()
+        self._hide_vrm_export_dock_after_export = False
         self._set_audio_export_actions_enabled(
             self._audio_render_task is None
             and self._audio_video_export_task is None
@@ -1827,7 +1860,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"ボーンデータを無視しました: {exc}", 5000)
 
     def _update_vrm_timeline_pose(self, timeline_seconds: float) -> None:
-        """Sample an active motion clip and apply it to the currently active VRM."""
+        """Preview the selected active VRM character and its paired motion track."""
         if not _VRM_VIEWER_AVAILABLE or self.preview_3d_dock is None:
             return
         try:
@@ -1848,19 +1881,33 @@ class MainWindow(QMainWindow):
                 if path.suffix.lower() == ".vrm" and path.is_file():
                     active_characters.append((clip, path))
 
-            if len(active_characters) > 1:
-                self.preview_3d_widget.set_timeline_state(None)
-                self.statusBar().showMessage(
-                    "同じ時間帯に複数のVRMキャラクターがあります。1体ずつ配置してください。",
-                    5000,
-                )
-                return
             if active_characters:
-                _clip, character_path = active_characters[0]
+                track_order = {
+                    track.id: index
+                    for index, track in enumerate(model.tracks)
+                }
+                active_characters.sort(
+                    key=lambda item: (
+                        track_order.get(item[0].track_id, len(track_order)),
+                        item[0].start,
+                        item[0].id,
+                    )
+                )
+                selected_clip_id = self.timeline_panel.selected_clip_id
+                selected_character = next(
+                    (
+                        item for item in active_characters
+                        if item[0].id == selected_clip_id
+                    ),
+                    active_characters[0],
+                )
+                character_clip, character_path = selected_character
                 if self.preview_3d_widget.model_path != character_path.resolve():
                     self.preview_3d_widget.load_model(character_path)
                 if not self.preview_3d_dock.isVisible():
                     self.preview_3d_dock.show()
+            else:
+                character_clip = None
 
             active_motion = []
             for clip in model.clips:
@@ -1873,14 +1920,20 @@ class MainWindow(QMainWindow):
                     continue
                 active_motion.append(clip)
 
+            if character_clip is not None:
+                active_motion = motion_clips_for_character(
+                    model, character_clip, active_motion
+                )
+
             if not active_motion:
                 self.preview_3d_widget.set_timeline_state(None)
                 return
             if len(active_motion) > 1:
                 self.preview_3d_widget.set_timeline_state(None)
                 self.statusBar().showMessage(
-                    "VRM再生中のモーションクリップが重なっています。",
-                    5000,
+                    "選択キャラクターに対応するモーションクリップが重なっています。"
+                    "同じMotionトラック上で時間を分けてください。",
+                    6000,
                 )
                 return
 
@@ -2288,6 +2341,14 @@ class MainWindow(QMainWindow):
             return 5.0
         return 5.0
 
+    def _select_timeline_asset_track(self, tracks, clip_kind: str):
+        return select_timeline_asset_track(
+            self,
+            self.timeline_panel.model,
+            tracks,
+            clip_kind,
+        )
+
     def add_timeline_clip_from_assets(self) -> None:
         available = [
             asset for asset in self._project.assets
@@ -2322,17 +2383,9 @@ class MainWindow(QMainWindow):
             track for track in self.timeline_panel.model.tracks
             if track.kind == track_kind and not track.locked
         ]
-        if not tracks:
-            default_name = {
-                "video": "Video 1",
-                "audio": "Audio 1",
-                "overlay": "Overlay 1",
-                "other": "Other 1",
-            }.get(track_kind, f"{track_kind.title()} 1")
-            suffix = 1 + sum(
-                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
-            )
-            tracks = [self.timeline_panel.model.add_track(f"{default_name.split()[0]} {suffix}", track_kind)]
+        target_track = self._select_timeline_asset_track(tracks, clip_kind) if tracks else None
+        if tracks and target_track is None:
+            return
 
         default_duration = self._asset_default_duration(asset)
         duration, accepted = QInputDialog.getDouble(
@@ -2347,9 +2400,26 @@ class MainWindow(QMainWindow):
         if not accepted:
             return
 
+        # Create a fallback track only after the user confirms the clip duration.
+        # Cancelling either dialog must not leave an empty track in the project.
+        if target_track is None:
+            default_name = {
+                "video": "Video 1",
+                "audio": "Audio 1",
+                "overlay": "Overlay 1",
+                "motion": "Motion 1",
+                "other": "Other 1",
+            }[track_kind]
+            suffix = 1 + sum(
+                1 for track in self.timeline_panel.model.tracks if track.kind == track_kind
+            )
+            target_track = self.timeline_panel.model.add_track(
+                f"{default_name.split()[0]} {suffix}", track_kind
+            )
+
         try:
             self.timeline_panel.add_clip(
-                tracks[0].id,
+                target_track.id,
                 clip_kind,
                 asset.name,
                 duration,

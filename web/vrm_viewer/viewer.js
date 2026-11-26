@@ -6,11 +6,16 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 const stage = document.getElementById('stage');
 const hint = document.getElementById('hint');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x17191f);
+scene.background = null;
 
 const camera = new THREE.PerspectiveCamera(32, 1, 0.01, 100);
 camera.position.set(0, 1.45, 3.6);
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  alpha: true,
+  preserveDrawingBuffer: true,
+});
+renderer.setClearColor(0x000000, 0);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -39,6 +44,8 @@ loader.register((parser) => new VRMLoaderPlugin(parser));
 const clock = new THREE.Clock();
 
 let currentVrm = null;
+let currentModelUrl = null;
+let lastLoadError = null;
 let headBasePosition = null;
 let hipsBasePosition = null;
 let previousExpressions = new Set();
@@ -65,6 +72,7 @@ function disposeCurrentModel() {
   scene.remove(currentVrm.scene);
   VRMUtils.deepDispose(currentVrm.scene);
   currentVrm = null;
+  currentModelUrl = null;
   headBasePosition = null;
   hipsBasePosition = null;
   baseBoneTransforms.clear();
@@ -99,6 +107,7 @@ async function loadModel(url) {
     return;
   }
   const generation = ++modelLoadGeneration;
+  lastLoadError = null;
   setStatus('VRMモデルを読み込んでいます...');
   try {
     const gltf = await loader.loadAsync(url);
@@ -118,6 +127,7 @@ async function loadModel(url) {
     vrm.scene.traverse((object) => { object.frustumCulled = false; });
     disposeCurrentModel();
     currentVrm = vrm;
+    currentModelUrl = url;
     scene.add(vrm.scene);
     vrm.scene.updateMatrixWorld(true);
     const head = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('head');
@@ -154,8 +164,9 @@ async function loadModel(url) {
     setStatus('読み込み完了: ' + (vrm.meta?.name || 'VRMモデル'));
   } catch (error) {
     if (generation !== modelLoadGeneration) return;
+    lastLoadError = error?.message || String(error);
     console.error(error);
-    setStatus('読み込みエラー: ' + (error?.message || error));
+    setStatus('読み込みエラー: ' + lastLoadError);
   }
 }
 
@@ -226,9 +237,43 @@ window.axralVrmViewer = {
   closeModel() {
     modelLoadGeneration += 1;
     disposeCurrentModel();
+    currentModelUrl = null;
+    lastLoadError = null;
     setStatus('VRMモデルを閉じました');
   },
+  getModelStatus() {
+    return { url: currentModelUrl, error: lastLoadError };
+  },
   setMocapState: applyMocapState,
+  renderFrameDataUrl(state, width, height, deltaSeconds) {
+    if (!currentVrm) throw new Error('VRM model is not loaded');
+    const oldPixelRatio = renderer.getPixelRatio();
+    const oldGridVisible = grid.visible;
+    const oldBackground = scene.background;
+    const oldClearColor = renderer.getClearColor(new THREE.Color()).clone();
+    const oldClearAlpha = renderer.getClearAlpha();
+    const oldToneMapping = renderer.toneMapping;
+    try {
+      renderer.setPixelRatio(1);
+      renderer.setSize(Math.max(1, Math.floor(width)), Math.max(1, Math.floor(height)), false);
+      camera.aspect = Math.max(1, width) / Math.max(1, height);
+      camera.updateProjectionMatrix();
+      grid.visible = false;
+      scene.background = null;
+      renderer.setClearColor(0x000000, 0);
+      applyMocapState(state);
+      currentVrm.update(Math.max(0, Math.min(Number(deltaSeconds) || 0, 0.1)));
+      renderer.render(scene, camera);
+      return renderer.domElement.toDataURL('image/png');
+    } finally {
+      grid.visible = oldGridVisible;
+      scene.background = oldBackground;
+      renderer.setClearColor(oldClearColor, oldClearAlpha);
+      renderer.toneMapping = oldToneMapping;
+      renderer.setPixelRatio(oldPixelRatio);
+      resize();
+    }
+  },
 };
 
 function animate() {

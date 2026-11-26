@@ -86,6 +86,7 @@ class VRMViewerWidget(QWidget):
         self._ready_probe_count = 0
         self._bones: dict[str, dict] = {}
         self._expressions: dict[str, float] = {}
+        self._timeline_state: dict | None = None
         self._server: _ViewerHttpServer | None = None
         self._server_thread: threading.Thread | None = None
         self._viewer_origin: str | None = None
@@ -119,6 +120,10 @@ class VRMViewerWidget(QWidget):
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(33)
         self._state_timer.timeout.connect(self._flush_mocap_state)
+
+    @property
+    def model_path(self) -> Path | None:
+        return self._pending_model_path
 
     @staticmethod
     def _new_model_route() -> str:
@@ -206,7 +211,10 @@ class VRMViewerWidget(QWidget):
             self.status_label.setText(f"VRMを開けません: {exc}")
             return
 
+        if self._pending_model_path == resolved and self._model_url is not None:
+            return
         self._pending_model_path = resolved
+        self._timeline_state = None
         self._ready_probe_count = 0
         if not self._ensure_viewer():
             return
@@ -222,6 +230,7 @@ class VRMViewerWidget(QWidget):
     def close_model(self) -> None:
         self._pending_model_path = None
         self._model_url = None
+        self._timeline_state = None
         if self._server is not None:
             self._server.model_path = None
             self._server.model_route = self._new_model_route()
@@ -297,6 +306,17 @@ class VRMViewerWidget(QWidget):
         except (TypeError, ValueError, OverflowError):
             return
 
+    def set_timeline_state(self, state: dict | None) -> None:
+        """Set a sampled timeline pose; it takes priority over live VMC input."""
+        if state is None:
+            self._timeline_state = None
+            return
+        bones = state.get("bones", {})
+        expressions = state.get("expressions", {})
+        if not isinstance(bones, dict) or not isinstance(expressions, dict):
+            return
+        self._timeline_state = {"bones": bones, "expressions": expressions}
+
     def _on_page_loaded(self, success: bool) -> None:
         self._page_ready = bool(success)
         if not success:
@@ -340,7 +360,11 @@ class VRMViewerWidget(QWidget):
     def _flush_mocap_state(self) -> None:
         if not self._page_ready or self._web_view is None:
             return
-        state = {"bones": self._bones, "expressions": self._expressions}
+        state = (
+            self._timeline_state
+            if self._timeline_state is not None
+            else {"bones": self._bones, "expressions": self._expressions}
+        )
         try:
             payload = json.dumps(state, allow_nan=False, separators=(",", ":"))
         except (TypeError, ValueError):

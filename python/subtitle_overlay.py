@@ -5,7 +5,7 @@ import os
 import platform
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 
 def _font_candidates() -> list[Path]:
@@ -87,8 +87,10 @@ def render_subtitle_png(
     width: int,
     height: int,
     output_path: str | Path,
+    *,
+    speaker_color: str | None = None,
 ) -> Path:
-    """Create a transparent, bottom-centered subtitle card with wrapped text."""
+    """Create a transparent subtitle card; optionally add the speaker's color accent."""
     normalized = str(text).strip()
     if not normalized:
         raise ValueError("字幕テキストが空です")
@@ -132,6 +134,24 @@ def render_subtitle_png(
         radius=max(8, int(font_size * 0.28)),
         fill=(0, 0, 0, 178),
     )
+    if speaker_color:
+        try:
+            red, green, blue = ImageColor.getrgb(str(speaker_color))
+            accent = (red, green, blue, 255)
+        except (TypeError, ValueError):
+            accent = None
+        if accent is not None:
+            stripe_width = max(4, int(font_size * 0.16))
+            draw.rounded_rectangle(
+                (
+                    box_left + 3,
+                    box_top + 5,
+                    box_left + 3 + stripe_width,
+                    box_bottom - 5,
+                ),
+                radius=max(2, stripe_width // 2),
+                fill=accent,
+            )
 
     y = box_top + padding_y
     for line, box, line_height in zip(lines, boxes, line_heights):

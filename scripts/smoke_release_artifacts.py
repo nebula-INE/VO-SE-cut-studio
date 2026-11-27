@@ -65,7 +65,10 @@ def main() -> int:
         fail(f"missing VO-SE runtime library: {core_path}")
     try:
         import ctypes
+        dll_directory = os.add_dll_directory(str(build_dir)) if system == "Windows" else None
         ctypes.CDLL(str(core_path.resolve()))
+        # Keep the Windows DLL search handle alive for the rest of this smoke run.
+        _ = dll_directory
     except OSError as exc:
         fail(f"could not load {core_path.name}: {exc}")
     print(f"[runtime-smoke] OK: {core_name} loaded")

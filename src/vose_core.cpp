@@ -552,7 +552,7 @@ static bool normalize_voice_sample_rate(std::vector<double>& waveform, int sourc
         if (std::abs(weight_sum) > 1e-12) {
             resampled[static_cast<size_t>(out_index)] = weighted_sum / weight_sum;
         } else {
-            const int64_t nearest = std::clamp<int64_t>(center, 0, input_count - 1);
+            const int64_t nearest = clamp<int64_t>(center, 0, input_count - 1);
             resampled[static_cast<size_t>(out_index)] = waveform[static_cast<size_t>(nearest)];
         }
     }

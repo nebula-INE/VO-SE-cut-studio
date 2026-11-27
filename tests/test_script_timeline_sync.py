@@ -59,7 +59,10 @@ def test_caption_timing_tracks_voice_clip_moves_and_trims():
     lines = _lines()
     voices = _add_voice_clips(model, lines, {"line-a", "line-b"})
     sync_generated_subtitle_clips(model, lines, {"line-a", "line-b"})
-    caption = next(clip for clip in model.clips if clip.script_line_id == "line-a")
+    caption = next(
+        clip for clip in model.clips
+        if clip.kind == "text" and clip.script_line_id == "line-a"
+    )
     alternate = model.add_track("Voice edit", "audio")
     model.move_clip(voices["line-a"].id, 8.4, track_id=alternate.id, snap_seconds=None)
     model.trim_clip(voices["line-a"].id, duration=0.6)
@@ -76,10 +79,13 @@ def test_sync_preserves_manually_moved_and_trimmed_subtitle_clips():
     lines = _lines()
     _add_voice_clips(model, lines, {"line-a", "line-b"})
     sync_generated_subtitle_clips(model, lines, {"line-a", "line-b"})
-    existing = next(clip for clip in model.clips if clip.script_line_id == "line-a")
-    original_track_id = existing.track_id
-    model.move_clip(existing.id, 8.4, snap_seconds=None)
-    model.trim_clip(existing.id, duration=0.6)
+    caption = next(
+        clip for clip in model.clips
+        if clip.kind == "text" and clip.script_line_id == "line-a"
+    )
+    original_track_id = caption.track_id
+    model.move_clip(caption.id, 8.4, snap_seconds=None)
+    model.trim_clip(caption.id, duration=0.6)
 
     changed = sync_generated_subtitle_clips(
         model,
@@ -90,9 +96,10 @@ def test_sync_preserves_manually_moved_and_trimmed_subtitle_clips():
         {"line-a", "line-b"},
     )
 
-    restored = model.get_clip(existing.id)
+    restored = model.get_clip(caption.id)
     assert not changed
-    assert restored is existing
+    assert restored is caption
+    assert restored.kind == "text"
     assert restored.track_id == original_track_id
     assert restored.start == 8.4
     assert restored.duration == 0.6
@@ -133,10 +140,16 @@ def test_sync_updates_unedited_generated_caption_timing_after_regeneration():
         {"line_id": "line-a", "speaker_name": "Narrator", "text": "First", "duration_sec": 1.0},
         {"line_id": "line-b", "speaker_name": "Actor", "text": "Second", "duration_sec": 2.0},
     ]
-    voices = _add_voice_clips(model, initial, {"line-a", "line-b"})
+    _add_voice_clips(model, initial, {"line-a", "line-b"})
     sync_generated_subtitle_clips(model, initial, {"line-a", "line-b"})
-    first = next(clip for clip in model.clips if clip.script_line_id == "line-a")
-    second = next(clip for clip in model.clips if clip.script_line_id == "line-b")
+    first = next(
+        clip for clip in model.clips
+        if clip.kind == "text" and clip.script_line_id == "line-a"
+    )
+    second = next(
+        clip for clip in model.clips
+        if clip.kind == "text" and clip.script_line_id == "line-b"
+    )
     assert first.auto_generated
     assert second.auto_generated
 
@@ -147,7 +160,7 @@ def test_sync_updates_unedited_generated_caption_timing_after_regeneration():
     voice_track = next(track for track in model.tracks if track.kind == "audio")
     timeline_start = 0.0
     for line in regenerated:
-        voice, _changed = model.upsert_voice_clip(
+        model.upsert_voice_clip(
             voice_track.id,
             f'{line["speaker_name"]}: {line["text"]}',
             line["duration_sec"],

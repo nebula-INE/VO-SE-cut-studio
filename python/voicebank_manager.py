@@ -32,10 +32,36 @@ import struct
 import wave
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 
 from vose_engine import VoseEngine
+
+
+def _safe_zip_member_target(destination: Path, member_name: str) -> Path:
+    """Resolve a ZIP member only when both POSIX and Windows rules keep it inside destination."""
+    if not member_name or "\x00" in member_name:
+        raise ValueError(f"不正なパスを含むZIPファイルです: {member_name!r}")
+
+    normalized = member_name.replace("\\", "/")
+    posix_name = PurePosixPath(normalized)
+    windows_name = PureWindowsPath(member_name)
+    if (
+        posix_name.is_absolute()
+        or windows_name.is_absolute()
+        or bool(windows_name.drive)
+        or any(part == ".." for part in posix_name.parts)
+    ):
+        raise ValueError(f"不正なパスを含むZIPファイルです: {member_name!r}")
+
+    root = destination.resolve()
+    target = (root / Path(*posix_name.parts)).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"不正なパスを含むZIPファイルです: {member_name!r}") from exc
+    return target
+
 
 # VoiceBank.type の値。"utau"は今回実装、"official"は拡張ポイントのみ用意。
 VOICEBANK_TYPE_UTAU = "utau"
@@ -339,15 +365,15 @@ class VoicebankManager:
             shutil.copytree(source, dest_dir)
         elif source.suffix.lower() == ".zip":
             dest_dir.mkdir(parents=True)
-            with zipfile.ZipFile(source, "r") as zf:
-                # ZIPスラッシュ("../"等)によるディレクトリトラバーサルを
-                # 防ぐため、各エントリの展開先がdest_dir配下に収まることを
-                # 確認してから展開する。
-                for member in zf.namelist():
-                    member_path = (dest_dir / member).resolve()
-                    if not str(member_path).startswith(str(dest_dir.resolve())):
-                        raise ValueError(f"不正なパスを含むZIPファイルです: {member!r}")
-                zf.extractall(dest_dir)
+            try:
+                with zipfile.ZipFile(source, "r") as zf:
+                    # Validate every entry before extracting any member.
+                    for member in zf.namelist():
+                        _safe_zip_member_target(dest_dir, member)
+                    zf.extractall(dest_dir)
+            except Exception:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                raise
         else:
             raise ValueError(f"フォルダまたは.zipファイルを指定してください: {source_path}")
 

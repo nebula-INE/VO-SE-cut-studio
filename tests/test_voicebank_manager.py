@@ -3,7 +3,7 @@ import zipfile
 
 import pytest
 
-from voicebank_manager import VoiceBankManager, _safe_zip_member_target
+from voicebank_manager import VoicebankManager, _safe_zip_member_target
 
 
 def test_safe_zip_member_stays_inside_destination(tmp_path: Path) -> None:
@@ -39,7 +39,7 @@ def test_import_rejects_malicious_zip_before_extracting_any_file(tmp_path: Path)
         zf.writestr("../outside.wav", b"escaped")
 
     destination = tmp_path / "voicebanks"
-    manager = VoiceBankManager()
+    manager = VoicebankManager()
     with pytest.raises(ValueError, match="不正なパス"):
         manager.import_voicebank(str(archive), str(destination), display_name="malicious")
 

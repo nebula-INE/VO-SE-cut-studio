@@ -40,6 +40,7 @@ from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
 from timeline_editor import TimelineEditorWidget
 from timeline_track_selection import select_timeline_asset_track
+from script_timeline_sync import sync_generated_subtitle_clips
 from timeline_model import TimelineError, TimelineModel
 from timeline_audio import TimelineAudioPlayback
 from timeline_audio_render import (
@@ -302,6 +303,7 @@ class _TimelineFullVideoExportTask(QRunnable):
         output_path: str,
         ffmpeg_path: str,
         subtitle_texts: dict[str, str] | None = None,
+        subtitle_colors: dict[str, str] | None = None,
         vrm_frame_renderer=None,
     ) -> None:
         super().__init__()
@@ -310,6 +312,7 @@ class _TimelineFullVideoExportTask(QRunnable):
         self.output_path = output_path
         self.ffmpeg_path = ffmpeg_path
         self.subtitle_texts = dict(subtitle_texts or {})
+        self.subtitle_colors = dict(subtitle_colors or {})
         self.vrm_frame_renderer = vrm_frame_renderer
         self.signals = _TimelineAudioRenderSignals()
 
@@ -339,6 +342,7 @@ class _TimelineFullVideoExportTask(QRunnable):
                     duration_seconds=duration,
                     ffmpeg_path=self.ffmpeg_path,
                     subtitle_texts=self.subtitle_texts,
+                    subtitle_colors=self.subtitle_colors,
                     motion_clips=motion_clips,
                     voice_clips=audio_clips,
                     vrm_frame_renderer=self.vrm_frame_renderer,
@@ -722,6 +726,7 @@ class MainWindow(QMainWindow):
             if line.line_id in self.script_panel._synth_wav_paths
             and self.script_panel._synth_input_fingerprints.get(line.line_id)
             == self.script_panel.synthesis_fingerprint(line.line_id)
+            and Path(self.script_panel._synth_wav_paths[line.line_id]).is_file()
         ]
         valid_ids = {line.line_id for line in valid_lines}
         changed = False
@@ -738,9 +743,22 @@ class MainWindow(QMainWindow):
                 and clip.script_line_id not in valid_ids
             )
         ]
-        changed = len(model.clips) != old_clip_count
+        changed = changed or len(model.clips) != old_clip_count
 
         if not valid_lines:
+            changed = sync_generated_subtitle_clips(
+                model,
+                [
+                    {
+                        "line_id": line.line_id,
+                        "speaker_name": line.speaker_name,
+                        "text": line.text,
+                        "duration_sec": line.duration_sec,
+                    }
+                    for line in self.script_panel.model.lines
+                ],
+                set(),
+            ) or changed
             if changed:
                 self.timeline_panel.refresh()
                 self.timeline_panel.changed.emit()
@@ -789,6 +807,28 @@ class MainWindow(QMainWindow):
                 )
                 changed = changed or clip_changed
             timeline_start += line.duration_sec
+
+        linked_voice_line_ids = {
+            clip.script_line_id
+            for clip in model.clips
+            if clip.kind == "voice"
+            and clip.script_line_id in valid_ids
+            and (asset := self._project.get_asset(clip.asset_id or "")) is not None
+            and asset.kind == "audio"
+        }
+        changed = sync_generated_subtitle_clips(
+            model,
+            [
+                {
+                    "line_id": line.line_id,
+                    "speaker_name": line.speaker_name,
+                    "text": line.text,
+                    "duration_sec": line.duration_sec,
+                }
+                for line in self.script_panel.model.lines
+            ],
+            linked_voice_line_ids,
+        ) or changed
 
         if changed:
             self.timeline_panel.refresh()
@@ -1659,10 +1699,19 @@ class MainWindow(QMainWindow):
 
         try:
             snapshot = TimelineModel.from_dict(self.timeline_panel.model.to_dict())
+            script_payload = self.script_panel.model.to_dict()
             subtitle_texts = {
                 str(line.get("line_id", "")): str(line.get("text", ""))
-                for line in self.script_panel.model.to_dict().get("lines", [])
+                for line in script_payload.get("lines", [])
                 if line.get("line_id") and str(line.get("text", "")).strip()
+            }
+            speaker_colors = {
+                speaker.name: speaker.color for speaker in self.script_panel.model.speakers
+            }
+            subtitle_colors = {
+                str(line.get("line_id", "")): speaker_colors[line.get("speaker_name", "")]
+                for line in script_payload.get("lines", [])
+                if line.get("line_id") and line.get("speaker_name") in speaker_colors
             }
             visual_clips = timeline_video_clips(
                 snapshot, subtitle_texts, allow_vrm=_VRM_VIEWER_AVAILABLE
@@ -1744,6 +1793,7 @@ class MainWindow(QMainWindow):
             str(output_path),
             ffmpeg_path,
             subtitle_texts,
+            subtitle_colors,
             vrm_frame_renderer=(
                 self.preview_3d_widget.render_frame_png
                 if _VRM_VIEWER_AVAILABLE and self.preview_3d_dock is not None

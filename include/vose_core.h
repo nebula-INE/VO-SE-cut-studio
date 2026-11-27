@@ -12,7 +12,7 @@
 
 // ディスクキャッシュの先頭に書き込むヘッダ情報
 struct VoseCacheHeader {
-    uint32_t magic;     // 'VOSE' (0x45534F56) かどうかを確認するマジックナンバー
+    uint32_t magic;     // キャッシュ形式互換性のマジックナンバー
     int length;         // フレーム数
     int spec_bins;      // 周波数ビン数
 };
@@ -72,6 +72,11 @@ extern "C" {
 
     // 1. 音源をメモリにパッキングする（内蔵音源化の必須関数）
     DLLEXPORT void load_embedded_resource(const char* phoneme, const int16_t* raw_data, int sample_count);
+
+    // Extended API: normalize PCM using its original source sample rate.
+    // The legacy 3-argument function remains available with a 44.1kHz contract.
+    DLLEXPORT void load_embedded_resource_ex(
+        const char* phoneme, const int16_t* raw_data, int sample_count, int sample_rate);
 
     // 2. レンダリング実行関数
     DLLEXPORT void execute_render(NoteEvent* notes, int note_count, const char* output_path, int mode_flag);

@@ -264,10 +264,11 @@ def test_render_timeline_video_adds_subtitle_as_timed_overlay(tmp_path, monkeypa
         lambda *_args, **_kwargs: (1280, 720),
     )
 
-    def fake_subtitle(text, width, height, path):
+    def fake_subtitle(text, width, height, path, *, speaker_color=None):
         path = Path(path)
         path.write_text(text, encoding="utf-8")
         captured["subtitle"] = (text, width, height, path)
+        captured["speaker_color"] = speaker_color
         return path
 
     monkeypatch.setattr(timeline_video_render, "render_subtitle_png", fake_subtitle)
@@ -283,11 +284,13 @@ def test_render_timeline_video_adds_subtitle_as_timed_overlay(tmp_path, monkeypa
         lambda _clip: video_path,
         output,
         subtitle_texts={"line-a": "最新テキスト"},
+        subtitle_colors={"line-a": "#D94A4A"},
         ffmpeg_path=executable,
     )
 
     graph = captured["command"][captured["command"].index("-filter_complex") + 1]
     assert captured["subtitle"][:3] == ("最新テキスト", 1280, 720)
+    assert captured["speaker_color"] == "#D94A4A"
     assert "setpts=PTS-STARTPTS+0.75/TB" in graph
     assert "gte(t,0.75)" in graph
     assert "lt(t,2.25)" in graph

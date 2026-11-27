@@ -437,6 +437,7 @@ def render_timeline_video(
     ffmpeg_path: str | Path | None = None,
     still_image_canvas: tuple[int, int] = (1920, 1080),
     subtitle_texts: Mapping[str, str] | None = None,
+    subtitle_colors: Mapping[str, str] | None = None,
     motion_clips: Iterable[TimelineClip] | None = None,
     voice_clips: Iterable[TimelineClip] = (),
     vrm_frame_renderer: Callable[[str | Path, dict, float], bytes] | None = None,
@@ -615,11 +616,16 @@ def render_timeline_video(
                         raise VideoRenderError(
                             f"字幕クリップ「{clip.name}」に表示テキストがありません"
                         )
+                    speaker_color = (
+                        subtitle_colors.get(clip.script_line_id or "")
+                        if subtitle_colors is not None else None
+                    )
                     image_source = render_subtitle_png(
                         subtitle_text,
                         width,
                         height,
                         subtitle_dir / f"subtitle_{index}.png",
+                        speaker_color=speaker_color,
                     )
                 command.extend([
                     "-loop", "1",

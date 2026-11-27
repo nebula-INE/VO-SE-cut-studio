@@ -251,6 +251,55 @@ def test_upsert_voice_clip_creates_missing_line_at_script_position():
     assert created.script_line_id == "line-new"
 
 
+def test_upsert_generated_voice_refreshes_timing_until_the_user_edits_it():
+    model = TimelineModel.create_default()
+    voice_track = next(track for track in model.tracks if track.kind == "audio")
+
+    created, _changed = model.upsert_voice_clip(
+        voice_track.id,
+        "Narrator: first line",
+        1.0,
+        start=0.0,
+        asset_id="voice-v1",
+        script_line_id="line-generated",
+    )
+    assert created.auto_generated
+
+    updated, changed = model.upsert_voice_clip(
+        voice_track.id,
+        "Narrator: regenerated line",
+        1.6,
+        start=0.4,
+        asset_id="voice-v2",
+        script_line_id="line-generated",
+    )
+    assert changed
+    assert updated is created
+    assert updated.name == "Narrator: regenerated line"
+    assert updated.start == 0.4
+    assert updated.duration == 1.6
+    assert updated.asset_id == "voice-v2"
+
+    alternate = model.add_track("Dialogue edit", "audio")
+    model.move_clip(created.id, 8.0, track_id=alternate.id, snap_seconds=None)
+    model.trim_clip(created.id, duration=0.5)
+
+    preserved, changed_after_edit = model.upsert_voice_clip(
+        voice_track.id,
+        "Narrator: latest",
+        2.1,
+        start=0.0,
+        asset_id="voice-v3",
+        script_line_id="line-generated",
+    )
+    assert changed_after_edit  # the source WAV changes, but the user's edit remains
+    assert preserved.track_id == alternate.id
+    assert preserved.start == 8.0
+    assert preserved.duration == 0.5
+    assert preserved.name == "Narrator: regenerated line"
+    assert preserved.asset_id == "voice-v3"
+
+
 
 def test_legacy_audio_clip_payload_defaults_to_full_volume_without_fades():
     model = TimelineModel.create_default()

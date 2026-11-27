@@ -142,6 +142,7 @@ class TimelineClip:
     source_in: float = 0.0
     asset_id: str | None = None
     script_line_id: str | None = None
+    auto_generated: bool = False
     enabled: bool = True
     # Qt QAudioOutput uses a normalized linear gain in the [0, 1] range.
     volume: float = 1.0
@@ -190,6 +191,7 @@ class TimelineClip:
                 script_line_id=(
                     str(data["script_line_id"]) if data.get("script_line_id") is not None else None
                 ),
+                auto_generated=data.get("auto_generated", False),
                 enabled=data.get("enabled", True),
                 volume=_number(data.get("volume", 1.0), "clip volume"),
                 fade_in=_number(data.get("fade_in", 0.0), "clip fade_in"),
@@ -219,6 +221,8 @@ class TimelineClip:
             raise TimelineError(f"Clip duration must be at least {MIN_CLIP_DURATION_SEC} seconds")
         if not isinstance(clip.enabled, bool):
             raise TimelineError("Timeline clip enabled flag must be a boolean")
+        if not isinstance(clip.auto_generated, bool):
+            raise TimelineError("Timeline clip auto_generated flag must be a boolean")
         if clip.asset_id is None and clip.script_line_id is None:
             raise TimelineError("Timeline clip must reference an asset or a script line")
         _validate_audio_properties(clip.volume, clip.fade_in, clip.fade_out, clip.duration)
@@ -384,6 +388,7 @@ class TimelineModel:
         source_in: float = 0.0,
         asset_id: str | None = None,
         script_line_id: str | None = None,
+        auto_generated: bool = False,
         volume: float = 1.0,
         fade_in: float = 0.0,
         fade_out: float = 0.0,
@@ -406,6 +411,8 @@ class TimelineModel:
             raise TimelineError(f"Clip duration must be at least {MIN_CLIP_DURATION_SEC} seconds")
         if asset_id is None and script_line_id is None:
             raise TimelineError("Timeline clip must reference an asset or a script line")
+        if not isinstance(auto_generated, bool):
+            raise TimelineError("Timeline clip auto_generated flag must be a boolean")
         if not name.strip():
             raise TimelineError("Timeline clip name must not be empty")
         volume_value = _number(volume, "clip volume")
@@ -432,6 +439,7 @@ class TimelineModel:
             source_in=source_value,
             asset_id=asset_id,
             script_line_id=script_line_id,
+            auto_generated=auto_generated,
             volume=volume_value,
             fade_in=fade_in_value,
             fade_out=fade_out_value,
@@ -470,6 +478,21 @@ class TimelineModel:
             changed = existing.asset_id != asset_id
             if changed:
                 existing.asset_id = asset_id
+            if existing.auto_generated:
+                start_value = _number(start, "clip start")
+                duration_value = _number(duration, "clip duration")
+                if start_value < 0 or duration_value < MIN_CLIP_DURATION_SEC:
+                    raise TimelineError("Generated voice timing is invalid")
+                changed = changed or (
+                    existing.name != name
+                    or existing.start != start_value
+                    or existing.duration != duration_value
+                    or existing.source_in != 0.0
+                )
+                existing.name = name.strip()
+                existing.start = start_value
+                existing.duration = duration_value
+                existing.source_in = 0.0
             return existing, changed
 
         created = self.add_clip(
@@ -480,6 +503,54 @@ class TimelineModel:
             start=start,
             asset_id=asset_id,
             script_line_id=script_line_id,
+            auto_generated=True,
+        )
+        return created, True
+
+    def upsert_script_subtitle_clip(
+        self,
+        preferred_track_id: str,
+        name: str,
+        duration: float,
+        *,
+        start: float,
+        script_line_id: str,
+    ) -> tuple[TimelineClip, bool]:
+        """Create a script-linked subtitle once and preserve subsequent timeline edits."""
+        existing = next(
+            (
+                clip for clip in self.clips
+                if clip.kind == "text" and clip.script_line_id == script_line_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if not existing.auto_generated:
+                return existing, False
+            start_value = _number(start, "clip start")
+            duration_value = _number(duration, "clip duration")
+            if start_value < 0 or duration_value < MIN_CLIP_DURATION_SEC:
+                raise TimelineError("Generated subtitle timing is invalid")
+            changed = (
+                existing.name != name
+                or existing.start != start_value
+                or existing.duration != duration_value
+                or existing.source_in != 0.0
+            )
+            existing.name = name.strip()
+            existing.start = start_value
+            existing.duration = duration_value
+            existing.source_in = 0.0
+            return existing, changed
+
+        created = self.add_clip(
+            preferred_track_id,
+            "text",
+            name,
+            duration,
+            start=start,
+            script_line_id=script_line_id,
+            auto_generated=True,
         )
         return created, True
 
@@ -510,6 +581,7 @@ class TimelineModel:
             raise TimelineError("Clip cannot be moved to a track of a different kind")
         clip.start = new_start
         clip.track_id = destination_track.id
+        clip.auto_generated = False
         return clip
 
     def trim_clip(
@@ -530,6 +602,7 @@ class TimelineModel:
             raise TimelineError(f"Clip duration must be at least {MIN_CLIP_DURATION_SEC} seconds")
         clip.source_in = new_source_in
         clip.duration = new_duration
+        clip.auto_generated = False
         # A shorter trim must not leave an invalid fade outside the new clip bounds.
         clip.fade_in = min(clip.fade_in, new_duration)
         clip.fade_out = min(clip.fade_out, new_duration)
@@ -557,6 +630,7 @@ class TimelineModel:
         clip.volume = new_volume
         clip.fade_in = new_fade_in
         clip.fade_out = new_fade_out
+        clip.auto_generated = False
         return clip
 
     def set_character_transform(
@@ -602,6 +676,7 @@ class TimelineModel:
             source_in=clip.source_in + left_duration,
             asset_id=clip.asset_id,
             script_line_id=clip.script_line_id,
+            auto_generated=False,
             enabled=clip.enabled,
             volume=clip.volume,
             fade_in=0.0,
@@ -612,6 +687,7 @@ class TimelineModel:
             rotation_deg=clip.rotation_deg,
         )
         clip.duration = left_duration
+        clip.auto_generated = False
         clip.fade_in = min(clip.fade_in, left_duration)
         clip.fade_out = 0.0
         self.clips.append(right)

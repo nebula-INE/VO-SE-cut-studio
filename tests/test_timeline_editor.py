@@ -225,3 +225,33 @@ def test_invalid_beat_grid_config_is_ignored_safely(qapp):
     assert not editor.beat_snap_checkbox.isEnabled()
     editor.close()
     editor.deleteLater()
+
+
+
+def test_keyboard_clip_nudge_uses_beat_grid_only_when_enabled(qapp):
+    model = TimelineModel.create_default()
+    track = next(item for item in model.tracks if item.kind == "video")
+    clip = model.add_clip(track.id, "video", "scene.mov", 5.0, asset_id="scene")
+    editor = TimelineEditorWidget(model)
+    editor.canvas._set_selected_clip(clip.id)
+
+    event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Right,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    editor.canvas.keyPressEvent(event)
+    assert clip.start == pytest.approx(1.0 / model.frame_rate)
+
+    model.move_clip(clip.id, 0.0, snap_seconds=0.0)
+    editor.set_beat_grid_config({
+        "bpm": 120.0,
+        "offset_seconds": 0.0,
+        "beats_per_bar": 4,
+        "snap_to_beats": True,
+    })
+    editor.canvas.keyPressEvent(event)
+    assert clip.start == pytest.approx(0.5)
+
+    editor.close()
+    editor.deleteLater()

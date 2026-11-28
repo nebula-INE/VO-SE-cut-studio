@@ -1159,8 +1159,22 @@ class MainWindow(QMainWindow):
         )
         self._beat_analysis_task = task
         task.signals.finished.connect(
-            lambda result, clip_id=clip.id, start=clip.start, source_in=clip.source_in:
-                self._finish_beat_analysis(clip_id, start, source_in, result)
+            lambda result,
+            clip_id=clip.id,
+            start=clip.start,
+            source_in=clip.source_in,
+            duration=clip.duration,
+            asset_id=clip.asset_id,
+            project_id=self._project.project_id:
+                self._finish_beat_analysis(
+                    clip_id,
+                    start,
+                    source_in,
+                    duration,
+                    asset_id,
+                    project_id,
+                    result,
+                )
         )
         task.signals.failed.connect(self._on_beat_analysis_failed)
         self._beat_analysis_pool.start(task)
@@ -1176,15 +1190,21 @@ class MainWindow(QMainWindow):
         clip_id: str,
         original_start: float,
         original_source_in: float,
+        original_duration: float,
+        original_asset_id: str | None,
+        original_project_id: str,
         result: BeatAnalysisResult,
     ) -> None:
         self._beat_analysis_task = None
         self.statusBar().clearMessage()
         clip = self.timeline_panel.model.get_clip(clip_id)
         if (
-            clip is None
+            self._project.project_id != original_project_id
+            or clip is None
+            or clip.asset_id != original_asset_id
             or not math.isclose(clip.start, original_start, abs_tol=1e-6)
             or not math.isclose(clip.source_in, original_source_in, abs_tol=1e-6)
+            or not math.isclose(clip.duration, original_duration, abs_tol=1e-6)
         ):
             self.statusBar().showMessage(
                 "解析中に対象クリップが変更されました。もう一度解析してください。",
@@ -2818,12 +2838,18 @@ class MainWindow(QMainWindow):
             self._audio_render_task is not None
             or self._audio_video_export_task is not None
             or self._timeline_video_export_task is not None
+            or self._beat_analysis_task is not None
         ):
-            QMessageBox.information(
-                self,
-                "メディアを書き出し中",
-                "書き出しが完了するまでアプリを閉じることはできません。",
+            title = (
+                "音声を解析中" if self._beat_analysis_task is not None
+                else "メディアを書き出し中"
             )
+            message = (
+                "音声解析が完了するまでアプリを閉じることはできません。"
+                if self._beat_analysis_task is not None
+                else "書き出しが完了するまでアプリを閉じることはできません。"
+            )
+            QMessageBox.information(self, title, message)
             event.ignore()
             return
         if self._motion_capture_recorder.is_recording:

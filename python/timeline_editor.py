@@ -341,7 +341,12 @@ class TimelineCanvas(QWidget):
                 track = self.model.get_track(clip.track_id)
                 if track is not None and not track.locked:
                     try:
-                        self.model.move_clip(clip.id, clip.start + direction / self.model.frame_rate, snap_seconds=0.0)
+                        target_start = clip.start + direction / self.model.frame_rate
+                        if self.snap_to_beats:
+                            target_start = self._snap_time(target_start)
+                        self.model.move_clip(
+                            clip.id, target_start, snap_seconds=None
+                        )
                         self.refresh()
                         self.changed.emit()
                     except TimelineError:

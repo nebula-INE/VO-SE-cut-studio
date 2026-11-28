@@ -182,6 +182,9 @@ def make_archive(app_dir: Path) -> None:
                 check=True,
             )
         else:
+            optional_zip = RELEASE / f"{APP_NAME}-{VERSION}-macos.zip"
+            if optional_zip.exists():
+                optional_zip.unlink()
             print(
                 "[package] Skipping optional macOS ZIP; the DMG is the primary CI download. "
                 "Set AXRAL_MACOS_INCLUDE_ZIP=1 to build both formats.",

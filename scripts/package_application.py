@@ -72,7 +72,7 @@ def macos_zip_enabled() -> bool:
     duplicate archive and retain the DMG as the primary macOS download.
     """
     value = os.environ.get("AXRAL_MACOS_INCLUDE_ZIP", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    return value not in {"", "0", "false", "no", "off"}
 
 
 def build_application() -> Path:

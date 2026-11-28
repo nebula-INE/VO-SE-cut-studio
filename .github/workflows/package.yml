@@ -6,21 +6,27 @@ on:
   pull_request:
     branches: [main, feat/vrm-character-preview-v1, feat/vrm-timeline-mp4-export-v1, feat/vrm-multi-character-export-v1, feat/timeline-asset-track-selection-v1 ]
   workflow_dispatch:
+    inputs:
+      include_macos_zip:
+        description: "Also create the optional macOS ZIP archive alongside the DMG"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
 
 # Avoid spending runners on obsolete package builds after a newer PR commit arrives.
 concurrency:
-  group: axral-cut-studio-package-${{ github.ref }}
+  group: axral-cut-studio-package-\${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  AXRAL_PACKAGE_VERSION: 0.1.${{ github.run_number }}
+  AXRAL_PACKAGE_VERSION: 0.1.\${{ github.run_number }}
 
 jobs:
   package:
-    name: Package (${{ matrix.platform }})
+    name: Package (\${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +37,7 @@ jobs:
             os: macos-latest
           - platform: linux-x64
             os: ubuntu-22.04
-    runs-on: ${{ matrix.os }}
+    runs-on: \${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -115,12 +121,14 @@ jobs:
         run: python -m pytest -q
 
       - name: Build and smoke-test application packages
+        env:
+          AXRAL_MACOS_INCLUDE_ZIP: \${{ github.event_name == 'workflow_dispatch' && inputs.include_macos_zip && '1' || '0' }}
         run: python scripts/package_application.py
 
       - name: Upload distribution packages
         uses: actions/upload-artifact@v4
         with:
-          name: AxralCutStudio-${{ matrix.platform }}-${{ github.run_number }}
+          name: AxralCutStudio-\${{ matrix.platform }}-\${{ github.run_number }}
           path: release/*
           if-no-files-found: error
           retention-days: 30

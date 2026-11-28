@@ -183,3 +183,45 @@ def test_character_transform_controls_are_disabled_for_non_character_or_locked_c
 
     editor.close()
     editor.deleteLater()
+
+
+
+def test_beat_grid_config_draws_grid_and_snaps_clips_to_beats(qapp):
+    editor = TimelineEditorWidget(TimelineModel.create_default())
+    editor.set_beat_grid_config({
+        "bpm": 120.0,
+        "offset_seconds": 0.25,
+        "beats_per_bar": 4,
+        "snap_to_beats": True,
+    })
+
+    assert editor.beat_snap_checkbox.isEnabled()
+    assert editor.beat_snap_checkbox.isChecked()
+    assert editor.canvas._snap_time(1.22) == pytest.approx(1.25)
+    assert editor.beat_grid_config["bpm"] == pytest.approx(120.0)
+
+    editor.beat_snap_checkbox.setChecked(False)
+    assert not editor.canvas.snap_to_beats
+    assert editor.canvas._snap_time(1.23) == pytest.approx(1.2)
+    assert editor.beat_grid_config["snap_to_beats"] is False
+
+    editor.set_beat_grid_config(None)
+    assert not editor.beat_snap_checkbox.isEnabled()
+    assert editor.beat_grid_config is None
+    editor.close()
+    editor.deleteLater()
+
+
+def test_invalid_beat_grid_config_is_ignored_safely(qapp):
+    editor = TimelineEditorWidget(TimelineModel.create_default())
+    editor.set_beat_grid_config({
+        "bpm": 0,
+        "offset_seconds": float("nan"),
+        "beats_per_bar": 4,
+        "snap_to_beats": True,
+    })
+
+    assert editor.beat_grid_config is None
+    assert not editor.beat_snap_checkbox.isEnabled()
+    editor.close()
+    editor.deleteLater()

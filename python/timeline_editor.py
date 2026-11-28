@@ -1,6 +1,8 @@
 """Qt timeline editor with non-destructive move, trim, split and delete operations."""
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt, QSize, QRectF, Signal, QSignalBlocker
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -60,6 +62,8 @@ class TimelineCanvas(QWidget):
         self._original_duration = 0.0
         self._original_source_in = 0.0
         self._drag_changed = False
+        self.beat_grid: dict[str, float | int] | None = None
+        self.snap_to_beats = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self.setMinimumSize(self.sizeHint())
@@ -113,8 +117,19 @@ class TimelineCanvas(QWidget):
                 return clip, rect
         return None, None
 
-    @staticmethod
-    def _snap_time(seconds: float) -> float:
+    def set_beat_grid(self, config: dict[str, float | int] | None) -> None:
+        self.beat_grid = dict(config) if config is not None else None
+        self.snap_to_beats = bool(
+            self.beat_grid is not None and self.beat_grid.get("snap_to_beats", False)
+        )
+        self.update()
+
+    def _snap_time(self, seconds: float) -> float:
+        if self.snap_to_beats and self.beat_grid is not None:
+            bpm = float(self.beat_grid["bpm"])
+            interval = 60.0 / bpm
+            offset = float(self.beat_grid["offset_seconds"])
+            return offset + round((seconds - offset) / interval) * interval
         return round(seconds / 0.1) * 0.1
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -155,6 +170,32 @@ class TimelineCanvas(QWidget):
             if track.muted:
                 state += " · MUTED"
             painter.drawText(10, y + 43, state)
+
+        if self.beat_grid is not None:
+            bpm = float(self.beat_grid["bpm"])
+            interval = 60.0 / bpm
+            offset = float(self.beat_grid["offset_seconds"])
+            beats_per_bar = int(self.beat_grid.get("beats_per_bar", 4))
+            first_beat = math.floor((0.0 - offset) / interval)
+            last_beat = math.ceil((visible_end - offset) / interval)
+            for beat_index in range(first_beat, last_beat + 1):
+                beat_seconds = offset + beat_index * interval
+                if beat_seconds < 0.0:
+                    continue
+                x = self.LABEL_WIDTH + beat_seconds * self.pixels_per_second
+                is_bar = beat_index % beats_per_bar == 0
+                color = QColor("#536f91") if is_bar else QColor("#34485f")
+                painter.setPen(QPen(
+                    color,
+                    2 if is_bar else 1,
+                    Qt.PenStyle.SolidLine if is_bar else Qt.PenStyle.DotLine,
+                ))
+                painter.drawLine(int(round(x)), self.RULER_HEIGHT, int(round(x)), self.height())
+                if is_bar:
+                    bar_number = beat_index // beats_per_bar + 1
+                    painter.setPen(QPen(QColor("#b8cbe0")))
+                    painter.setFont(QFont("Sans Serif", 7))
+                    painter.drawText(int(round(x)) + 3, self.RULER_HEIGHT + 11, f"{bar_number}")
 
         for clip in self.model.clips:
             rect = self._clip_rect(clip)
@@ -197,7 +238,10 @@ class TimelineCanvas(QWidget):
         clip, rect = self._clip_at(x, y)
         if clip is None or rect is None:
             if x >= self.LABEL_WIDTH:
-                self.playhead_seconds = max(0.0, (x - self.LABEL_WIDTH) / self.pixels_per_second)
+                self.playhead_seconds = max(
+                    0.0,
+                    self._snap_time((x - self.LABEL_WIDTH) / self.pixels_per_second),
+                )
                 self.playhead_changed.emit(self.playhead_seconds)
                 self.update()
             self._set_selected_clip(None)
@@ -229,26 +273,34 @@ class TimelineCanvas(QWidget):
         clip = self.model.get_clip(self._drag_clip_id)
         if clip is None:
             return
-        delta = self._snap_time((float(event.position().x()) - self._drag_origin_x) / self.pixels_per_second)
+        delta = (
+            float(event.position().x()) - self._drag_origin_x
+        ) / self.pixels_per_second
         try:
             if self._drag_mode == "move":
                 target_track = self._track_at_y(float(event.position().y()))
                 track_id = target_track.id if target_track is not None and not target_track.locked else clip.track_id
+                snapped_start = max(0.0, self._snap_time(self._original_start + delta))
                 self.model.move_clip(
                     clip.id,
-                    max(0.0, self._original_start + delta),
+                    snapped_start,
                     track_id=track_id,
-                    snap_seconds=0.1,
+                    snap_seconds=None,
                 )
             elif self._drag_mode == "trim_right":
+                snapped_end = self._snap_time(
+                    self._original_start + self._original_duration + delta
+                )
                 self.model.trim_clip(
                     clip.id,
-                    duration=max(MIN_CLIP_DURATION_SEC, self._original_duration + delta),
+                    duration=max(MIN_CLIP_DURATION_SEC, snapped_end - self._original_start),
                 )
             elif self._drag_mode == "trim_left":
+                snapped_start = self._snap_time(self._original_start + delta)
+                adjusted_delta = snapped_start - self._original_start
                 minimum_delta = max(-self._original_source_in, -self._original_start)
                 maximum_delta = self._original_duration - MIN_CLIP_DURATION_SEC
-                adjusted_delta = min(max(delta, minimum_delta), maximum_delta)
+                adjusted_delta = min(max(adjusted_delta, minimum_delta), maximum_delta)
                 new_start = self._original_start + adjusted_delta
                 new_source_in = self._original_source_in + adjusted_delta
                 new_duration = self._original_duration - adjusted_delta
@@ -318,6 +370,7 @@ class TimelineEditorWidget(QWidget):
     def __init__(self, model: TimelineModel | None = None) -> None:
         super().__init__()
         self.model = model or TimelineModel.create_default()
+        self.beat_grid_config: dict[str, float | int | bool] | None = None
 
         self.playback_button = QPushButton("▶ 再生")
         self.stop_playback_button = QPushButton("■ 停止")
@@ -327,6 +380,8 @@ class TimelineEditorWidget(QWidget):
         self.delete_button = QPushButton("削除")
         self.zoom_out_button = QPushButton("−")
         self.zoom_in_button = QPushButton("＋")
+        self.beat_snap_checkbox = QCheckBox("拍スナップ")
+        self.beat_snap_checkbox.setEnabled(False)
         self.selection_label = QLabel("クリップ未選択")
         self.status_label = QLabel("ドラッグ: 移動／左右端: トリム")
 
@@ -396,6 +451,7 @@ class TimelineEditorWidget(QWidget):
         toolbar.addSpacing(8)
         toolbar.addWidget(self.zoom_out_button)
         toolbar.addWidget(self.zoom_in_button)
+        toolbar.addWidget(self.beat_snap_checkbox)
         toolbar.addWidget(self.selection_label)
         toolbar.addStretch(1)
         toolbar.addWidget(self.status_label)
@@ -449,6 +505,7 @@ class TimelineEditorWidget(QWidget):
         self.delete_button.clicked.connect(self.delete_selected)
         self.zoom_out_button.clicked.connect(lambda: self._zoom(-12))
         self.zoom_in_button.clicked.connect(lambda: self._zoom(12))
+        self.beat_snap_checkbox.toggled.connect(self._on_beat_snap_toggled)
         self.volume_spinbox.valueChanged.connect(self._apply_audio_controls)
         self.fade_in_spinbox.valueChanged.connect(self._apply_audio_controls)
         self.fade_out_spinbox.valueChanged.connect(self._apply_audio_controls)
@@ -457,6 +514,46 @@ class TimelineEditorWidget(QWidget):
         self.position_y_spinbox.valueChanged.connect(self._apply_character_controls)
         self.character_scale_spinbox.valueChanged.connect(self._apply_character_controls)
         self.character_rotation_spinbox.valueChanged.connect(self._apply_character_controls)
+
+    def set_beat_grid_config(self, config: dict | None) -> None:
+        normalized = None
+        if isinstance(config, dict):
+            try:
+                bpm = float(config["bpm"])
+                offset = float(config["offset_seconds"])
+                beats_per_bar = int(config.get("beats_per_bar", 4))
+                snap_enabled = config.get("snap_to_beats", False)
+                if (
+                    math.isfinite(bpm)
+                    and 40.0 <= bpm <= 240.0
+                    and math.isfinite(offset)
+                    and abs(offset) <= 3_600.0
+                    and 1 <= beats_per_bar <= 12
+                    and isinstance(snap_enabled, bool)
+                ):
+                    normalized = {
+                        "bpm": bpm,
+                        "offset_seconds": offset,
+                        "beats_per_bar": beats_per_bar,
+                        "snap_to_beats": snap_enabled,
+                    }
+            except (KeyError, TypeError, ValueError, OverflowError):
+                normalized = None
+        self.beat_grid_config = normalized
+        self.canvas.set_beat_grid(normalized)
+        blocker = QSignalBlocker(self.beat_snap_checkbox)
+        self.beat_snap_checkbox.setEnabled(normalized is not None)
+        self.beat_snap_checkbox.setChecked(
+            bool(normalized and normalized["snap_to_beats"])
+        )
+        del blocker
+
+    def _on_beat_snap_toggled(self, enabled: bool) -> None:
+        if self.beat_grid_config is None:
+            return
+        self.beat_grid_config["snap_to_beats"] = bool(enabled)
+        self.canvas.set_beat_grid(self.beat_grid_config)
+        self.changed.emit()
 
     @property
     def selected_clip_id(self) -> str | None:

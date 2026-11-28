@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from preview import PreviewPanel
-from beat_analysis import BeatAnalysisError, BeatAnalysisResult, analyze_audio_file
+from beat_analysis import BeatAnalysisResult, analyze_audio_file
 from runtime_paths import find_runtime_file
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel

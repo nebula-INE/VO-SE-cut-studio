@@ -168,7 +168,7 @@ def _read_with_ffmpeg(
 
 
 def _onset_envelope(samples: np.ndarray, sample_rate: float) -> tuple[np.ndarray, float]:
-    if samples.size < _FRAME_SIZE * 3:
+    if samples.size < int(sample_rate * 3.0):
         raise BeatAnalysisError("BPM解析には3秒以上の音声が必要です")
     if not np.all(np.isfinite(samples)):
         samples = np.nan_to_num(samples, copy=True)

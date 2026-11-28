@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from preview import PreviewPanel
+from beat_analysis import BeatAnalysisResult, analyze_audio_file
 from runtime_paths import find_runtime_file
 from project_model import ProjectDocument, ProjectError
 from script_editor import ScriptEditorPanel, ScriptModel
@@ -245,6 +246,29 @@ class _TimelineAudioRenderTask(QRunnable):
 
 
 
+class _BeatAnalysisTask(QRunnable):
+    """Analyze one selected audio clip without blocking the Qt event loop."""
+
+    def __init__(self, path: str, start_seconds: float, duration_seconds: float) -> None:
+        super().__init__()
+        self.path = path
+        self.start_seconds = start_seconds
+        self.duration_seconds = duration_seconds
+        self.signals = _TimelineAudioRenderSignals()
+
+    def run(self) -> None:
+        try:
+            result = analyze_audio_file(
+                self.path,
+                start_seconds=self.start_seconds,
+                duration_seconds=self.duration_seconds,
+            )
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+            return
+        self.signals.finished.emit(result)
+
+
 class _TimelineAudioVideoExportTask(QRunnable):
     """Render the timeline mix and mux it into an existing composed video."""
 
@@ -424,6 +448,9 @@ class MainWindow(QMainWindow):
         )
         self._audio_render_pool = QThreadPool(self)
         self._audio_render_pool.setMaxThreadCount(1)
+        self._beat_analysis_pool = QThreadPool(self)
+        self._beat_analysis_pool.setMaxThreadCount(1)
+        self._beat_analysis_task: _BeatAnalysisTask | None = None
         self._audio_render_task: _TimelineAudioRenderTask | None = None
         self._audio_video_export_task: _TimelineAudioVideoExportTask | None = None
         self._timeline_video_export_task: _TimelineFullVideoExportTask | None = None
@@ -567,6 +594,9 @@ class MainWindow(QMainWindow):
         character_action = timeline_menu.addAction("2Dキャラクタークリップを追加...")
         character_action.triggered.connect(self.add_2d_character_clip)
         timeline_menu.addSeparator()
+        analyze_bpm_action = timeline_menu.addAction("選択音声のBPM・拍位置を解析...")
+        analyze_bpm_action.triggered.connect(self.analyze_selected_audio_bpm)
+        timeline_menu.addSeparator()
         self._export_audio_mix_action = timeline_menu.addAction("音声ミックスをWAVに書き出す...")
         self._export_audio_mix_action.triggered.connect(self.export_timeline_audio_mix)
         self._export_audio_video_action = timeline_menu.addAction(
@@ -629,6 +659,11 @@ class MainWindow(QMainWindow):
     def _sync_project_script(self) -> None:
         self._project.script = self.script_panel.model.to_dict()
         self._project.timeline = self.timeline_panel.model.to_dict()
+        beat_grid = self.timeline_panel.beat_grid_config
+        if beat_grid is None:
+            self._project.settings.pop("beat_grid", None)
+        else:
+            self._project.settings["beat_grid"] = dict(beat_grid)
 
     def _on_synth_audio_ready(self, line_id: str, wav_path: str) -> None:
         fingerprint = self.script_panel.synthesis_fingerprint(line_id)
@@ -964,6 +999,7 @@ class MainWindow(QMainWindow):
         self._pending_generated_audio.clear()
         self.preview_panel.close_video()
         self.timeline_panel.set_model(TimelineModel.create_default())
+        self.timeline_panel.set_beat_grid_config(None)
         self.timeline_audio.prune_removed_clips()
         self._project = ProjectDocument.create()
         self._project.script = self.script_panel.model.to_dict()
@@ -1018,6 +1054,7 @@ class MainWindow(QMainWindow):
         self.timeline_panel.set_model(timeline_model)
         self.timeline_audio.prune_removed_clips()
         self._project = project
+        self.timeline_panel.set_beat_grid_config(project.settings.get("beat_grid"))
         self._project_dirty = recovered
         self._restore_generated_audio_assets()
         if self._discard_pending:
@@ -1087,6 +1124,130 @@ class MainWindow(QMainWindow):
         if not candidates:
             return None
         return max(candidates, key=lambda clip: (clip.start, clip.id))
+
+    def analyze_selected_audio_bpm(self) -> None:
+        """Analyze the selected timeline audio clip and create its beat grid."""
+        if self._beat_analysis_task is not None:
+            self.statusBar().showMessage("BPMを解析中です", 4000)
+            return
+        clip = self.timeline_panel.model.get_clip(
+            self.timeline_panel.selected_clip_id or ""
+        )
+        track = self.timeline_panel.model.get_track(clip.track_id) if clip is not None else None
+        if (
+            clip is None
+            or clip.kind not in {"audio", "voice"}
+            or track is None
+            or track.kind != "audio"
+        ):
+            QMessageBox.information(
+                self,
+                "BPM解析",
+                "タイムラインで解析するAudioまたはVoiceクリップを選択してください。",
+            )
+            return
+        try:
+            path = self._resolve_timeline_audio_asset(clip)
+        except (OSError, ProjectError, ValueError) as exc:
+            QMessageBox.warning(self, "BPM解析", str(exc))
+            return
+
+        task = _BeatAnalysisTask(
+            str(path),
+            start_seconds=clip.source_in,
+            duration_seconds=clip.duration,
+        )
+        self._beat_analysis_task = task
+        task.signals.finished.connect(
+            lambda result,
+            clip_id=clip.id,
+            start=clip.start,
+            source_in=clip.source_in,
+            duration=clip.duration,
+            asset_id=clip.asset_id,
+            project_id=self._project.project_id:
+                self._finish_beat_analysis(
+                    clip_id,
+                    start,
+                    source_in,
+                    duration,
+                    asset_id,
+                    project_id,
+                    result,
+                )
+        )
+        task.signals.failed.connect(self._on_beat_analysis_failed)
+        self._beat_analysis_pool.start(task)
+        self.statusBar().showMessage(f"BPM解析中: {clip.name}", 0)
+
+    def _on_beat_analysis_failed(self, message: str) -> None:
+        self._beat_analysis_task = None
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "BPM解析に失敗しました", message)
+
+    def _finish_beat_analysis(
+        self,
+        clip_id: str,
+        original_start: float,
+        original_source_in: float,
+        original_duration: float,
+        original_asset_id: str | None,
+        original_project_id: str,
+        result: BeatAnalysisResult,
+    ) -> None:
+        self._beat_analysis_task = None
+        self.statusBar().clearMessage()
+        clip = self.timeline_panel.model.get_clip(clip_id)
+        if (
+            self._project.project_id != original_project_id
+            or clip is None
+            or clip.asset_id != original_asset_id
+            or not math.isclose(clip.start, original_start, abs_tol=1e-6)
+            or not math.isclose(clip.source_in, original_source_in, abs_tol=1e-6)
+            or not math.isclose(clip.duration, original_duration, abs_tol=1e-6)
+        ):
+            self.statusBar().showMessage(
+                "解析中に対象クリップが変更されました。もう一度解析してください。",
+                8000,
+            )
+            return
+
+        bpm, accepted = QInputDialog.getDouble(
+            self,
+            "BPM解析結果",
+            "推定BPM（必要に応じて修正）:",
+            result.bpm,
+            40.0,
+            240.0,
+            2,
+        )
+        if not accepted:
+            return
+        timeline_offset = clip.start + result.beat_offset_seconds - original_source_in
+        offset, accepted = QInputDialog.getDouble(
+            self,
+            "拍位置の調整",
+            "先頭拍のタイムライン位置（秒）:",
+            timeline_offset,
+            -3_600.0,
+            3_600.0,
+            3,
+        )
+        if not accepted:
+            return
+
+        self.timeline_panel.set_beat_grid_config({
+            "bpm": bpm,
+            "offset_seconds": offset,
+            "beats_per_bar": 4,
+            "snap_to_beats": True,
+        })
+        self._mark_project_dirty()
+        confidence = round(result.confidence * 100.0)
+        self.statusBar().showMessage(
+            f"BPM {bpm:.2f} / 4拍子グリッドを設定しました（解析信頼度の目安: {confidence}%）",
+            8000,
+        )
 
     def _resolve_timeline_audio_asset(self, clip):
         asset = self._project.get_asset(clip.asset_id or "")
@@ -2677,12 +2838,18 @@ class MainWindow(QMainWindow):
             self._audio_render_task is not None
             or self._audio_video_export_task is not None
             or self._timeline_video_export_task is not None
+            or self._beat_analysis_task is not None
         ):
-            QMessageBox.information(
-                self,
-                "メディアを書き出し中",
-                "書き出しが完了するまでアプリを閉じることはできません。",
+            title = (
+                "音声を解析中" if self._beat_analysis_task is not None
+                else "メディアを書き出し中"
             )
+            message = (
+                "音声解析が完了するまでアプリを閉じることはできません。"
+                if self._beat_analysis_task is not None
+                else "書き出しが完了するまでアプリを閉じることはできません。"
+            )
+            QMessageBox.information(self, title, message)
             event.ignore()
             return
         if self._motion_capture_recorder.is_recording:

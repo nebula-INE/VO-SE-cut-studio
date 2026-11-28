@@ -17,7 +17,7 @@ aural Studio のタイムライン音声ミックスは、通常のPCM WAVなら
 FFmpegのWindowsビルドを用意し、例えば次のように設定します。
 
 ```powershell
-$env:FFMPEG_BINARY = "C:\\tools\\ffmpeg\\bin\\ffmpeg.exe"
+$env:FFMPEG_BINARY = "C:\tools\ffmpeg\bin\ffmpeg.exe"
 ffmpeg -version
 ```
 

@@ -6,39 +6,39 @@ aural Studio のタイムライン音声ミックスは、通常のPCM WAVなら
 
 アプリは次の順でFFmpegを探します。
 
-1. 環境変数 \`FFMPEG_BINARY\` に指定された実行ファイル
-2. PATH上の \`ffmpeg\` / \`ffmpeg.exe\`
+1. 環境変数 `FFMPEG_BINARY` に指定された実行ファイル
+2. PATH上の `ffmpeg` / `ffmpeg.exe`
 3. アプリ・リポジトリ内の一般的な同梱場所
 
-見つからない場合は、OSに応じてFFmpegをインストールするか、実行ファイルの絶対パスを \`FFMPEG_BINARY\` に設定してください。
+見つからない場合は、OSに応じてFFmpegをインストールするか、実行ファイルの絶対パスを `FFMPEG_BINARY` に設定してください。
 
 ### Windows
 
 FFmpegのWindowsビルドを用意し、例えば次のように設定します。
 
-\`\`\`powershell
+```powershell
 $env:FFMPEG_BINARY = "C:\\tools\\ffmpeg\\bin\\ffmpeg.exe"
 ffmpeg -version
-\`\`\`
+```
 
-FFmpegをアプリに同梱する場合は、\`ffmpeg.exe\` だけでなく、そのビルドが必要とするDLLも一緒に配置してください。
+FFmpegをアプリに同梱する場合は、`ffmpeg.exe` だけでなく、そのビルドが必要とするDLLも一緒に配置してください。
 
 ### macOS
 
 Homebrewを利用する場合:
 
-\`\`\`bash
+```bash
 brew install ffmpeg
 ffmpeg -version
-\`\`\`
+```
 
 ### Ubuntu / Debian
 
-\`\`\`bash
+```bash
 sudo apt update
 sudo apt install ffmpeg
 ffmpeg -version
-\`\`\`
+```
 
 ## タイムライン音声の書き出し
 
@@ -72,11 +72,11 @@ PCM WAV以外の素材は、FFmpegでクリップ区間だけをステレオfloa
 - 出力フレームレート: タイムラインのフレームレート
 - 映像: H.264 (libx264)、CRF 20
 
-字幕テキストは台本の行IDと対応付け、タイムライン上の開始時刻・長さで白文字＋半透明黒背景として焼き込みます。台本テキストを編集してから書き出すと、最新の台本内容が反映されます。日本語字幕には日本語対応フォントが必要です。WindowsはYu Gothic/Meiryo、macOSはヒラギノ、Ubuntu/Debianは \`fonts-noto-cjk\` を利用できます。別フォントを使う場合は \`VOSE_SUBTITLE_FONT\` にフォントファイルのパスを指定してください。
+字幕テキストは台本の行IDと対応付け、タイムライン上の開始時刻・長さで白文字＋半透明黒背景として焼き込みます。台本テキストを編集してから書き出すと、最新の台本内容が反映されます。日本語字幕には日本語対応フォントが必要です。WindowsはYu Gothic/Meiryo、macOSはヒラギノ、Ubuntu/Debianは `fonts-noto-cjk` を利用できます。別フォントを使う場合は `VOSE_SUBTITLE_FONT` にフォントファイルのパスを指定してください。
 
 組み込み2Dプレースホルダーキャラクターと、対応する保存モーションJSONは動画へ焼き込めます。VRM/FBX/GLB等の外部3DモデルとVMDファイルのオフライン描画は未対応です。未対応の3D素材をキャラクタークリップに指定した場合は、書き出しを中止して理由を表示します。
 
-動画素材がある場合はFFmpegに加えてFFprobeが必要です。通常のFFmpeg配布物には両方が含まれます。FFmpeg/FFprobeの実行ファイルは PATH、アプリ内の同梱場所、または \`FFMPEG_BINARY\` / \`FFPROBE_BINARY\` で指定できます。出力中もGUIは応答し、入力素材は上書きしません。
+動画素材がある場合はFFmpegに加えてFFprobeが必要です。通常のFFmpeg配布物には両方が含まれます。FFmpeg/FFprobeの実行ファイルは PATH、アプリ内の同梱場所、または `FFMPEG_BINARY` / `FFPROBE_BINARY` で指定できます。出力中もGUIは応答し、入力素材は上書きしません。
 
 
 
@@ -84,7 +84,7 @@ PCM WAV以外の素材は、FFmpegでクリップ区間だけをステレオfloa
 
 タイムラインメニューの「2Dキャラクタークリップを追加...」から、組み込みの2Dプレースホルダーを配置できます。キャラクターは左下へ透過合成されます。VoiceトラックのPCM16 WAVが重なる区間では、既存の音量・母音解析を使って口パクを生成します。Voiceクリップのsource-in、音量、フェードも口の動きに反映します。
 
-保存モーションは \`.motion.json\` 形式です。素材追加時に「motion」として認識され、Motionトラックへ配置できます。対応するキーフレーム項目は次のとおりです。
+保存モーションは `.motion.json` 形式です。素材追加時に「motion」として認識され、Motionトラックへ配置できます。対応するキーフレーム項目は次のとおりです。
 
 - 頭部: x / y (メートル)、tilt_deg (度)
 - 表情: blend_shapes の任意の0〜1値
@@ -94,7 +94,7 @@ PCM WAV以外の素材は、FFmpegでクリップ区間だけをステレオfloa
 
 最小サンプル:
 
-\`\`\`json
+```json
 {
   "format": "aural-motion",
   "version": 1,
@@ -115,35 +115,35 @@ PCM WAV以外の素材は、FFmpegでクリップ区間だけをステレオfloa
     }
   ]
 }
-\`\`\`
+```
 
 キーフレームの値は線形補間され、ボーン回転はクォータニオン補間されます。Motionクリップのsource-inも反映します。v1では同じ時間帯に重ねられるMotionクリップは1つです。
 
 
-ライブモーションキャプチャを録画する場合は、先にプロジェクトを保存し、「モーションキャプチャ → 録画開始／録画停止・タイムラインに保存」を使用します。録画したVMC/WebSocketデータはプロジェクト管理下の \`.motion.json\` 素材として保存され、Motionトラックへ配置されます。手動作成した \`.motion.json\` も同じ形式で読み込めます。
+ライブモーションキャプチャを録画する場合は、先にプロジェクトを保存し、「モーションキャプチャ → 録画開始／録画停止・タイムラインに保存」を使用します。録画したVMC/WebSocketデータはプロジェクト管理下の `.motion.json` 素材として保存され、Motionトラックへ配置されます。手動作成した `.motion.json` も同じ形式で読み込めます。
 
 
 ## 台本と字幕クリップの自動同期
 
-台本行の音声合成が完了し、生成WAVがプロジェクト管理下の素材として保存されると、対応する字幕クリップも \`Subtitles\` オーバーレイトラックへ自動配置されます。
+台本行の音声合成が完了し、生成WAVがプロジェクト管理下の素材として保存されると、対応する字幕クリップも `Subtitles` オーバーレイトラックへ自動配置されます。
 
-- 字幕クリップは台本行の \`script_line_id\` と関連付けられ、MP4書き出し時には保存時の固定文字列ではなく現在の台本文を参照します。
+- 字幕クリップは台本行の `script_line_id` と関連付けられ、MP4書き出し時には保存時の固定文字列ではなく現在の台本文を参照します。
 - 字幕の開始位置と長さは、対応するVoiceクリップの実際の開始位置・長さを使用します。Voiceクリップを移動またはトリミングした場合、自動生成状態の字幕もその位置・尺に追従します。
 - 音声を再生成した場合、自動配置のVoice・字幕クリップは新しいWAVの長さと台本順に合わせて更新されます。ユーザーが移動・トリミング・音量調整したVoiceクリップの編集内容は保持されます。
 - ユーザーが字幕クリップを移動またはトリミングすると、その字幕は手動編集扱いとなり、以後の自動同期は位置・尺を上書きしません。
 - 台本行の文章・話者が変更されて再合成待ちになった場合、古い音声に対応する自動字幕クリップは一旦取り除き、新しい音声がプロジェクトへ保存された後に最新テキストで再作成します。
 - 台本行と結び付いていない手動テキストクリップは自動同期の対象外です。
 
-字幕カードの左端には話者に設定された色がアクセントとして表示されます。字幕の本文は既存の日本語対応レンダラーで白文字＋半透明黒背景として焼き込まれます。フォント設定は上記の \`VOSE_SUBTITLE_FONT\` を利用できます。
+字幕カードの左端には話者に設定された色がアクセントとして表示されます。字幕の本文は既存の日本語対応レンダラーで白文字＋半透明黒背景として焼き込まれます。フォント設定は上記の `VOSE_SUBTITLE_FONT` を利用できます。
 
 ## 配布パッケージのサイズ
 
-macOSではDMGを標準の配布形式とし、同じ \`.app\` を再圧縮するZIPは任意で作成します。GitHub Actionsの通常のpush / pull requestではDMGだけをアップロードするため、macOS成果物に同じアプリのZIPとDMGが二重に含まれることを防ぎます。
+macOSではDMGを標準の配布形式とし、同じ `.app` を再圧縮するZIPは任意で作成します。GitHub Actionsの通常のpush / pull requestではDMGだけをアップロードするため、macOS成果物に同じアプリのZIPとDMGが二重に含まれることを防ぎます。
 
 ローカルで従来どおりZIPとDMGの両方を作成する場合:
 
-\`\`\`bash
+```bash
 AXRAL_MACOS_INCLUDE_ZIP=1 python scripts/package_application.py
-\`\`\`
+```
 
-GitHub Actionsの \`workflow_dispatch\` では \`include_macos_zip\` を有効にすると、macOS ZIPも追加生成できます。WindowsのZIP＋セットアップEXE、Linuxのtar.gz＋DEBは変更しません。
+GitHub Actionsの `workflow_dispatch` では `include_macos_zip` を有効にすると、macOS ZIPも追加生成できます。WindowsのZIP＋セットアップEXE、Linuxのtar.gz＋DEBは変更しません。

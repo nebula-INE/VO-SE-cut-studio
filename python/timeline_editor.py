@@ -341,9 +341,17 @@ class TimelineCanvas(QWidget):
                 track = self.model.get_track(clip.track_id)
                 if track is not None and not track.locked:
                     try:
-                        target_start = clip.start + direction / self.model.frame_rate
-                        if self.snap_to_beats:
-                            target_start = self._snap_time(target_start)
+                        if self.snap_to_beats and self.beat_grid is not None:
+                            interval = 60.0 / float(self.beat_grid["bpm"])
+                            offset = float(self.beat_grid["offset_seconds"])
+                            beat_position = (clip.start - offset) / interval
+                            if direction > 0:
+                                beat_index = math.floor(beat_position + 1e-9) + 1
+                            else:
+                                beat_index = math.ceil(beat_position - 1e-9) - 1
+                            target_start = offset + beat_index * interval
+                        else:
+                            target_start = clip.start + direction / self.model.frame_rate
                         self.model.move_clip(
                             clip.id, target_start, snap_seconds=None
                         )

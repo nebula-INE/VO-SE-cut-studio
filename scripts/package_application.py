@@ -65,6 +65,16 @@ def add_binary(arguments: list[str], source: Path, destination: str) -> None:
     arguments.extend(("--add-binary", f"{source}{os.pathsep}{destination}"))
 
 
+def macos_zip_enabled() -> bool:
+    """Return whether the optional macOS ZIP alongside the DMG should be built.
+
+    Local packaging keeps the historical behavior by default. CI can disable the
+    duplicate archive and retain the DMG as the primary macOS download.
+    """
+    value = os.environ.get("AXRAL_MACOS_INCLUDE_ZIP", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def build_application() -> Path:
     system = platform.system()
     build_dir = native_build_dir()
@@ -165,11 +175,18 @@ def make_archive(app_dir: Path) -> None:
                 if path.is_file():
                     output.write(path, path.relative_to(app_dir.parent))
     elif sys.platform == "darwin":
-        archive = RELEASE / f"{APP_NAME}-{VERSION}-macos.zip"
-        subprocess.run(
-            ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app_dir), str(archive)],
-            check=True,
-        )
+        if macos_zip_enabled():
+            archive = RELEASE / f"{APP_NAME}-{VERSION}-macos.zip"
+            subprocess.run(
+                ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app_dir), str(archive)],
+                check=True,
+            )
+        else:
+            print(
+                "[package] Skipping optional macOS ZIP; the DMG is the primary CI download. "
+                "Set AXRAL_MACOS_INCLUDE_ZIP=1 to build both formats.",
+                flush=True,
+            )
         staging = RELEASE / "dmg-stage"
         if staging.exists():
             shutil.rmtree(staging)

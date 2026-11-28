@@ -135,3 +135,15 @@ PCM WAV以外の素材は、FFmpegでクリップ区間だけをステレオfloa
 - 台本行と結び付いていない手動テキストクリップは自動同期の対象外です。
 
 字幕カードの左端には話者に設定された色がアクセントとして表示されます。字幕の本文は既存の日本語対応レンダラーで白文字＋半透明黒背景として焼き込まれます。フォント設定は上記の `VOSE_SUBTITLE_FONT` を利用できます。
+
+## 配布パッケージのサイズ
+
+macOSではDMGを標準の配布形式とし、同じ `.app` を再圧縮するZIPは任意で作成します。GitHub Actionsの通常のpush / pull requestではDMGだけをアップロードするため、macOS成果物に同じアプリのZIPとDMGが二重に含まれることを防ぎます。
+
+ローカルで従来どおりZIPとDMGの両方を作成する場合:
+
+```bash
+AXRAL_MACOS_INCLUDE_ZIP=1 python scripts/package_application.py
+```
+
+GitHub Actionsの `workflow_dispatch` では `include_macos_zip` を有効にすると、macOS ZIPも追加生成できます。WindowsのZIP＋セットアップEXE、Linuxのtar.gz＋DEBは変更しません。

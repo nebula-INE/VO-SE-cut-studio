@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, feat/vrm-character-preview-v1, feat/vrm-timeline-mp4-export-v1, feat/vrm-multi-character-export-v1, feat/timeline-asset-track-selection-v1 ]
   workflow_dispatch:
+    inputs:
+      include_macos_zip:
+        description: "Also create the optional macOS ZIP archive alongside the DMG"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -115,6 +121,8 @@ jobs:
         run: python -m pytest -q
 
       - name: Build and smoke-test application packages
+        env:
+          AXRAL_MACOS_INCLUDE_ZIP: ${{ github.event_name == 'workflow_dispatch' && inputs.include_macos_zip && '1' || '0' }}
         run: python scripts/package_application.py
 
       - name: Upload distribution packages
